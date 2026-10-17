@@ -19,7 +19,7 @@ import org.junit.jupiter.api.Test
 class FrontendUpstreamTest {
 
     private val serverManager: ServerManager = mockk()
-    private val upstream = FrontendUpstream(serverManager)
+    private val upstream = FrontendUpstream(mockk(relaxed = true), serverManager)
 
     @Test
     fun `Given a server URL when using it then the same URL on the virtual origin is returned`() {

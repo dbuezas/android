@@ -49,6 +49,9 @@ class FrontendUrlManager @Inject constructor(
     /** Moves the open frontend of [serverId] to the server URL of the last [UrlLoadResult.Success]. */
     fun announceServerUrlSwitch(serverId: Int) = upstream.announceSwitch(serverId)
 
+    /** TEMPORARY, test builds only. */
+    fun debugToast(text: String) = upstream.debugToast(text)
+
     /**
      * Tracks whether the ConnectionSecurityLevel has been shown for each server
      * during this viewModel lifecycle. Once shown for a specific server, the screen
@@ -97,6 +100,11 @@ class FrontendUrlManager @Inject constructor(
             )
             // A later URL for the same server is a switch between its internal and external URL
             val isSwitch = targetConsumed
+            // TEMPORARY test builds: show what the URL flow reports
+            upstream.debugToast(
+                "Test: URL " + ((urlState as? UrlState.HasUrl)?.url?.host ?: urlState::class.simpleName) +
+                    ", switch=$isSwitch, virtual=${upstream.isSupported}",
+            )
             // Only consume the target when a URL was actually loaded with it
             if (urlState is UrlState.HasUrl) {
                 targetConsumed = true

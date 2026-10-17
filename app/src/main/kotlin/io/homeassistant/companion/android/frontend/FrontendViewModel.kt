@@ -1036,6 +1036,11 @@ internal class FrontendViewModel @VisibleForTesting constructor(
         val isSwitch = result.isServerUrlSwitch &&
             current.serverId == result.serverId &&
             result.url.toUri().hasSameOrigin(current.url)
+        // TEMPORARY test builds: show why a URL result is or is not a switch
+        urlManager.debugToast(
+            "Test: result flag=${result.isServerUrlSwitch} sameServer=${current.serverId == result.serverId} " +
+                "sameOrigin=${result.url.toUri().hasSameOrigin(current.url)} state=${current.logDescription()}",
+        )
         if (!isSwitch) return false
         Timber.i("Server URL switch in state ${current.logDescription()}")
         if (current is FrontendViewState.Content || current is FrontendViewState.Loading) {
