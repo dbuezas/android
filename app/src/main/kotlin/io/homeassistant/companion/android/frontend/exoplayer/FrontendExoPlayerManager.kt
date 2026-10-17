@@ -15,6 +15,7 @@ import dagger.hilt.android.scopes.ViewModelScoped
 import io.homeassistant.companion.android.common.util.di.SuspendProvider
 import io.homeassistant.companion.android.common.util.initializePlayer
 import io.homeassistant.companion.android.frontend.handler.FrontendHandlerEvent
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstream
 import java.io.Closeable
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,16 +36,19 @@ import timber.log.Timber
 @ViewModelScoped
 class FrontendExoPlayerManager @VisibleForTesting constructor(
     private val playerCreator: suspend (ExoPlayer.() -> Unit) -> ExoPlayer,
+    private val toRealUrl: (String) -> String = { it },
 ) : Closeable {
 
     @Inject
     constructor(
         @ApplicationContext context: Context,
         dataSourceFactoryProvider: SuspendProvider<DataSource.Factory>,
+        upstream: FrontendUpstream,
     ) : this(
         { configure ->
             initializePlayer(context, dataSourceFactoryProvider()).apply(configure)
         },
+        upstream::toRealUrl,
     )
 
     private var player: ExoPlayer? = null
@@ -71,7 +75,8 @@ class FrontendExoPlayerManager @VisibleForTesting constructor(
     private suspend fun playHls(url: Uri, muted: Boolean) {
         val exoPlayer = getOrCreatePlayer()
         exoPlayer.stop()
-        exoPlayer.setMediaItem(MediaItem.fromUri(url))
+        // The frontend builds the URL from its own origin, which may be the app-internal one
+        exoPlayer.setMediaItem(MediaItem.fromUri(toRealUrl(url.toString())))
         exoPlayer.playWhenReady = true
         exoPlayer.volume = if (muted) 0f else 1f
         exoPlayer.prepare()

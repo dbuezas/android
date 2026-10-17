@@ -5,6 +5,7 @@ import io.homeassistant.companion.android.common.data.servers.ServerManager
 import io.homeassistant.companion.android.common.data.servers.UrlState
 import io.homeassistant.companion.android.frontend.navigation.FrontendTarget
 import io.homeassistant.companion.android.frontend.session.ServerSessionManager
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstream
 import io.homeassistant.companion.android.util.UrlUtil
 import io.homeassistant.companion.android.util.compose.webview.EXTERNAL_AUTH_QUERY_PARAM
 import io.homeassistant.companion.android.util.hasSameOrigin
@@ -33,7 +34,11 @@ private const val MORE_INFO_ENTITY_ID_QUERY_PARAM = "more-info-entity-id"
 class FrontendUrlManager @Inject constructor(
     private val serverManager: ServerManager,
     private val sessionManager: ServerSessionManager,
+    private val upstream: FrontendUpstream,
 ) {
+
+    /** The real server URL for a URL on the app-internal frontend origin, or [url] itself for other URLs. */
+    fun toRealUrl(url: String): String = upstream.toRealUrl(url)
 
     /**
      * Tracks whether the ConnectionSecurityLevel has been shown for each server
@@ -80,11 +85,13 @@ class FrontendUrlManager @Inject constructor(
                 urlState = urlState,
                 target = currentTarget,
             )
+            // A later URL for the same server is a switch between its internal and external URL
+            val isSwitch = targetConsumed
             // Only consume the target when a URL was actually loaded with it
             if (urlState is UrlState.HasUrl) {
                 targetConsumed = true
             }
-            emit(result)
+            emit(if (result is UrlLoadResult.Success && isSwitch) result.copy(isServerUrlSwitch = true) else result)
         }
     }
 
@@ -132,8 +139,14 @@ class FrontendUrlManager @Inject constructor(
 
             else -> {
                 // Signal the frontend that authentication is provided through the JavaScript bridge
-                val urlWithAuth = url.newBuilder().addQueryParameter(EXTERNAL_AUTH_QUERY_PARAM, "1").build().toString()
-                Timber.d("Loading server URL: ${sensitive(urlWithAuth)}")
+                val realUrl = url.newBuilder().addQueryParameter(EXTERNAL_AUTH_QUERY_PARAM, "1").build()
+                Timber.d("Loading server URL: ${sensitive(realUrl.toString())}")
+                // On the app-internal origin, a later switch to the other server URL does not reload the page
+                val urlWithAuth = if (upstream.isSupported) {
+                    upstream.useServerUrl(serverId, realUrl).toString()
+                } else {
+                    realUrl.toString()
+                }
                 UrlLoadResult.Success(
                     url = urlWithAuth,
                     serverId = serverId,

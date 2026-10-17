@@ -20,6 +20,7 @@ import io.homeassistant.companion.android.common.R as commonR
 import io.homeassistant.companion.android.common.data.keychain.ClientCertProvider
 import io.homeassistant.companion.android.common.data.keychain.KeyChainRepository
 import io.homeassistant.companion.android.frontend.error.FrontendConnectionError
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstream
 import java.lang.ref.WeakReference
 import javax.inject.Inject
 import kotlinx.coroutines.flow.StateFlow
@@ -49,7 +50,10 @@ private val HISTORY_CHANGED_SCRIPT = """
  * The created clients handle Home Assistant-specific concerns such as TLS client authentication,
  * error mapping to [FrontendConnectionError], and JavaScript injection into the WebView.
  */
-class HAWebViewClientFactory @Inject constructor(private val keyChainRepository: KeyChainRepository) {
+class HAWebViewClientFactory @Inject constructor(
+    private val keyChainRepository: KeyChainRepository,
+    private val upstream: FrontendUpstream,
+) {
     /**
      * Creates a new [HAWebViewClient] with the specified configuration.
      *
@@ -99,6 +103,7 @@ class HAWebViewClientFactory @Inject constructor(private val keyChainRepository:
             onReceivedHttpAuthRequest = onReceivedHttpAuthRequest,
             onCanGoBackChanged = onCanGoBackChanged,
             onSubresourceSslError = onSubresourceSslError,
+            upstream = upstream,
         )
     }
 }
@@ -122,7 +127,14 @@ class HAWebViewClient internal constructor(
     )?,
     private val onCanGoBackChanged: ((canGoBack: Boolean) -> Unit)? = null,
     private val onSubresourceSslError: ((url: String?) -> Unit)? = null,
+    private val upstream: FrontendUpstream? = null,
 ) : TLSWebViewClient(keyChainRepository, clientCertProvider) {
+
+    /** Serves the app-internal frontend origin from the current server, see [FrontendUpstream]. */
+    override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+        if (request != null) upstream?.intercept(request)?.let { return it }
+        return super.shouldInterceptRequest(view, request)
+    }
 
     /** Last resource URL loaded by the WebView, used to identify the resource requesting auth. */
     private var lastResourceUrl: String? = null

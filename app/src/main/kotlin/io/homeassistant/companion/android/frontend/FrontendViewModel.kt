@@ -658,7 +658,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
             if (!permissionManager.checkStoragePermissionForDownload()) return@launch
 
             val result = downloadManager.downloadFile(
-                url = url,
+                url = urlManager.toRealUrl(url),
                 contentDisposition = contentDisposition,
                 mimetype = mimetype,
                 serverId = viewState.value.serverId,
@@ -771,7 +771,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
         val uri = getCurrentUri.await()
 
         if (uri != null) {
-            val openEvent = FrontendEvent.OpenExternalLink(uri)
+            val openEvent = FrontendEvent.OpenExternalLink(urlManager.toRealUrl(uri.toString()).toUri())
             _events.emit(openEvent)
         } else {
             Timber.w("Open in browser requested but current URI couldn't be read")
@@ -1013,6 +1013,15 @@ internal class FrontendViewModel @VisibleForTesting constructor(
     private suspend fun handleUrlResult(result: UrlLoadResult) {
         when (result) {
             is UrlLoadResult.Success -> {
+                val current = _viewState.value
+                if (result.isServerUrlSwitch && current.serverId == result.serverId && result.url.toUri().hasSameOrigin(current.url)) {
+                    // The page stays on the same app-internal origin: requests already go to the new server
+                    // URL and the page reconnects its WebSockets, so only a page that is not showing reloads.
+                    if (current !is FrontendViewState.Content && current !is FrontendViewState.Loading) {
+                        startLoad(result.serverId)
+                    }
+                    return
+                }
                 pendingMoreInfoEntityId = result.moreInfoEntityId
                 _viewState.update { currentState ->
                     FrontendViewState.Loading(

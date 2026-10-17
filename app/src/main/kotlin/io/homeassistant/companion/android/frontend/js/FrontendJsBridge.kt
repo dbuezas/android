@@ -18,6 +18,8 @@ import io.homeassistant.companion.android.common.util.UnknownJsonContentDeserial
 import io.homeassistant.companion.android.database.server.Server
 import io.homeassistant.companion.android.frontend.externalbus.frontendExternalBusJson
 import io.homeassistant.companion.android.frontend.session.AuthPayload
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstream
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstreamScript
 import io.homeassistant.companion.android.util.hasSameOrigin
 import io.homeassistant.companion.android.util.sensitive
 import kotlinx.coroutines.CoroutineScope
@@ -114,6 +116,7 @@ private val bridgeMessageJson = Json(frontendExternalBusJson) {
 class FrontendJsBridge @AssistedInject constructor(
     private val handler: FrontendJsHandler,
     private val serverManager: ServerManager,
+    private val upstream: FrontendUpstream,
     @Assisted private val scope: CoroutineScope,
     @Assisted private val stateProvider: () -> BridgeState,
 ) : FrontendJsCallback {
@@ -130,6 +133,7 @@ class FrontendJsBridge @AssistedInject constructor(
      */
     @SuppressLint("RequiresFeature")
     override suspend fun attachToWebView(webView: WebView) {
+        FrontendUpstreamScript.attach(webView, upstream, scope)
         val useV2 = serverManager.getServer(stateProvider().serverId).isServerSupportingExternalAppV2()
         val webMessageListenerSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
         if (useV2 && webMessageListenerSupported) {
@@ -148,6 +152,7 @@ class FrontendJsBridge @AssistedInject constructor(
      */
     @SuppressLint("RequiresFeature")
     override fun detachFromWebView(webView: WebView) {
+        FrontendUpstreamScript.detach(webView, upstream)
         val webMessageListenerSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
         webView.removeJavascriptInterface(EXTERNAL_APP_V1)
         if (webMessageListenerSupported) {

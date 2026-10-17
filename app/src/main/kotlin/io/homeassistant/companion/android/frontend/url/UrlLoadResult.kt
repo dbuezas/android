@@ -15,7 +15,12 @@ sealed interface UrlLoadResult {
      *   via JavaScript once the page has loaded. Used as a fallback for servers older than HA 2025.6,
      *   which ignore the `more-info-entity-id` URL parameter.
      */
-    data class Success(val url: String, val serverId: Int, val moreInfoEntityId: String? = null) : UrlLoadResult
+    data class Success(
+        val url: String,
+        val serverId: Int,
+        val moreInfoEntityId: String? = null,
+        val isServerUrlSwitch: Boolean = false,
+    ) : UrlLoadResult
 
     /**
      * Server not found in the database.
