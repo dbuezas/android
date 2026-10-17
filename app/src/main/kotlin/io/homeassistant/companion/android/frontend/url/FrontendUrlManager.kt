@@ -40,6 +40,15 @@ class FrontendUrlManager @Inject constructor(
     /** The real server URL for a URL on the app-internal frontend origin, or [url] itself for other URLs. */
     fun toRealUrl(url: String): String = upstream.toRealUrl(url)
 
+    /** The app-internal frontend URL for a link to one of [serverId]'s own addresses, or null for other links. */
+    fun toVirtualUrl(serverId: Int, url: String): String? = upstream.toVirtualUrl(serverId, url)
+
+    /** Ids of servers whose open frontend just moved to a new server URL without reloading. */
+    val serverUrlMoves: Flow<Int> = upstream.moves
+
+    /** Moves the open frontend of [serverId] to the server URL of the last [UrlLoadResult.Success]. */
+    fun announceServerUrlSwitch(serverId: Int) = upstream.announceSwitch(serverId)
+
     /**
      * Tracks whether the ConnectionSecurityLevel has been shown for each server
      * during this viewModel lifecycle. Once shown for a specific server, the screen
@@ -68,6 +77,7 @@ class FrontendUrlManager @Inject constructor(
         }
 
         val actualServerId = server.id
+        upstream.rememberConnection(actualServerId, server.connection)
         if (!sessionManager.isSessionConnected(actualServerId)) {
             Timber.w("Session not connected for server: $actualServerId")
             emit(UrlLoadResult.SessionNotConnected(actualServerId))

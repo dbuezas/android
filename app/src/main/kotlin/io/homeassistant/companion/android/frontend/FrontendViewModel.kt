@@ -335,7 +335,8 @@ internal class FrontendViewModel @VisibleForTesting constructor(
      * without priming, which the load's own error handling reports, never to a broken state.
      */
     suspend fun prepareUrlLoad(url: String) {
-        val manifestUrl = url.toHttpUrlOrNull()?.resolve("/manifest.json") ?: return
+        // On the app-internal origin the page itself is served by the app; prime the real server
+        val manifestUrl = urlManager.toRealUrl(url).toHttpUrlOrNull()?.resolve("/manifest.json") ?: return
         if (keyChainRepository.getClientCertProvider().certificate == null) return
 
         val action = WebViewAction.PingUrl(manifestUrl.toString())
@@ -418,6 +419,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
     val improvScanRequested: StateFlow<Boolean> = improvHandler.scanRequested
 
     init {
+        collectServerUrlMoves()
         viewModelScope.launch {
             _viewState.collect { state ->
                 Timber.d("Frontend state: ${state.logDescription()}")
@@ -847,6 +849,21 @@ internal class FrontendViewModel @VisibleForTesting constructor(
         _viewState.update { FrontendViewState.LoadServer(serverId = serverId, target = target) }
     }
 
+    /** Tells the user when the frontend moved between the internal and the external URL without reloading. */
+    private fun collectServerUrlMoves() {
+        viewModelScope.launch {
+            urlManager.serverUrlMoves.collect { serverId ->
+                if (serverId != _viewState.value.serverId) return@collect
+                val message = if (resolveIsInternalConnection(serverId)) {
+                    commonR.string.frontend_switched_to_internal_url
+                } else {
+                    commonR.string.frontend_switched_to_external_url
+                }
+                _events.emit(FrontendEvent.ShowSnackbar(message))
+            }
+        }
+    }
+
     private fun loadServer(serverId: Int, target: FrontendTarget) {
         urlFlowJob?.cancel()
         urlFlowJob = viewModelScope.launch {
@@ -1016,8 +1033,11 @@ internal class FrontendViewModel @VisibleForTesting constructor(
                 val current = _viewState.value
                 if (result.isServerUrlSwitch && current.serverId == result.serverId && result.url.toUri().hasSameOrigin(current.url)) {
                     // The page stays on the same app-internal origin: requests already go to the new server
-                    // URL and the page reconnects its WebSockets, so only a page that is not showing reloads.
-                    if (current !is FrontendViewState.Content && current !is FrontendViewState.Loading) {
+                    // URL and the page moves its WebSockets there, so only a page that is not showing reloads.
+                    if (current is FrontendViewState.Content || current is FrontendViewState.Loading) {
+                        prepareUrlLoad(urlManager.toRealUrl(result.url))
+                        urlManager.announceServerUrlSwitch(result.serverId)
+                    } else {
                         startLoad(result.serverId)
                     }
                     return
@@ -1111,8 +1131,16 @@ internal class FrontendViewModel @VisibleForTesting constructor(
      *
      * @return `true` when the URL was intercepted (the host will handle it), `false` to let the WebView load it.
      */
-    private fun onUrlIntercepted(uri: Uri): Boolean {
+    /** Navigates the frontend to [target]'s path without reloading it. */
+    private fun navigateInFrontend(target: Uri) {
+        val path = target.encodedPath.orEmpty() + target.encodedQuery?.let { "?$it" }.orEmpty() +
+            target.encodedFragment?.let { "#$it" }.orEmpty()
+        viewModelScope.launch { externalBusRepository.send(NavigateToMessage(path = path)) }
+    }
+
+        private fun onUrlIntercepted(uri: Uri): Boolean {
         val rawUrl = uri.toString()
+        val serverLink = urlManager.toVirtualUrl(_viewState.value.serverId, rawUrl)
         return when {
             rawUrl.startsWith(APP_PREFIX) -> {
                 _events.tryEmit(FrontendEvent.LaunchApp(rawUrl.substringAfter(APP_PREFIX)))
@@ -1125,6 +1153,12 @@ internal class FrontendViewModel @VisibleForTesting constructor(
             }
 
             uri.hasSameOrigin(urlFlow.value) -> false
+
+            // A link to one of the server's own addresses stays in the app, on its internal origin
+            serverLink != null -> {
+                navigateInFrontend(serverLink.toUri())
+                true
+            }
 
             else -> {
                 _events.tryEmit(FrontendEvent.OpenExternalLink(uri))
