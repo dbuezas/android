@@ -198,6 +198,7 @@
       this._holding = false;
       this._moving = null;
       this._native = this._connect();
+      this._host = new URL(this._native.url).host;
       this._listen(this._native);
     }
 
@@ -289,7 +290,7 @@
         if (old) old.close();
         return;
       }
-      this._move().then((ok) => { if (ok) channel.postMessage(JSON.stringify({ type: 'moved' })); });
+      this._move();
     }
 
     /** Opens and logs in a connection to the current server, then hands the conversation over to it. */
@@ -330,6 +331,7 @@
 
     async _handOver(ws) {
       const old = this._native;
+      const fromHost = this._host;
       this._holding = true;
       // Commands already sent on a working old connection get their answers there first
       const drainUntil = Date.now() + DRAIN_TIMEOUT_MS;
@@ -359,6 +361,10 @@
       this._outbox = [];
       queued.forEach((data) => this.send(data));
       if (old) { try { old.close(); } catch (e) {} }
+      // Tell the app when the connection now runs on another server, however it got there (an announced
+      // switch, or a reconnect after the old network went away)
+      this._host = new URL(ws.url).host;
+      if (fromHost && fromHost !== this._host) channel.postMessage(JSON.stringify({ type: 'moved' }));
     }
 
     _hasOpenCommands() {

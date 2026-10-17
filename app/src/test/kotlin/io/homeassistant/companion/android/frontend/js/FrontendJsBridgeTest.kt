@@ -60,6 +60,7 @@ class FrontendJsBridgeTest {
     ) = FrontendJsBridge(
         handler = handler,
         serverManager = serverManager,
+        upstreamChannel = mockk(relaxed = true),
         scope = scope,
         stateProvider = stateProvider,
     )

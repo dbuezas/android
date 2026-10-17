@@ -11,6 +11,7 @@ import io.homeassistant.companion.android.database.server.ServerSessionInfo
 import io.homeassistant.companion.android.database.server.ServerUserInfo
 import io.homeassistant.companion.android.frontend.navigation.FrontendTarget
 import io.homeassistant.companion.android.frontend.session.ServerSessionManager
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstream
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
@@ -35,11 +36,14 @@ class FrontendUrlManagerTest {
     private val serverManager: ServerManager = mockk()
     private val sessionManager: ServerSessionManager = mockk()
     private val connectionStateProvider: ServerConnectionStateProvider = mockk()
+
+    // Without WebView support for the app-internal origin, the real server URL is loaded as before
+    private val upstream: FrontendUpstream = mockk(relaxed = true) { every { isSupported } returns false }
     private lateinit var urlManager: FrontendUrlManager
 
     @BeforeEach
     fun setup() {
-        urlManager = FrontendUrlManager(serverManager, sessionManager)
+        urlManager = FrontendUrlManager(serverManager, sessionManager, upstream)
     }
 
     @Test

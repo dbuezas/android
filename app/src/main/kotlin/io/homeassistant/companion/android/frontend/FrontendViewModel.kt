@@ -773,7 +773,9 @@ internal class FrontendViewModel @VisibleForTesting constructor(
         val uri = getCurrentUri.await()
 
         if (uri != null) {
-            val openEvent = FrontendEvent.OpenExternalLink(urlManager.toRealUrl(uri.toString()).toUri())
+            // A page on the app-internal origin opens at the server's real address
+            val realUrl = urlManager.toRealUrl(uri.toString())
+            val openEvent = FrontendEvent.OpenExternalLink(if (realUrl == uri.toString()) uri else realUrl.toUri())
             _events.emit(openEvent)
         } else {
             Timber.w("Open in browser requested but current URI couldn't be read")
@@ -1023,6 +1025,29 @@ internal class FrontendViewModel @VisibleForTesting constructor(
     suspend fun processImprovScanRequests() = improvHandler.processImprovScanRequests()
 
     /**
+     * Handles a switch between the internal and the external URL of the shown server without a reload,
+     * when the page stays on the same app-internal origin: requests already go to the new server URL and
+     * the page moves its WebSocket there. A page that is not showing is loaded again instead.
+     *
+     * @return `true` when [result] was such a switch and is fully handled
+     */
+    private suspend fun handleServerUrlSwitch(result: UrlLoadResult.Success): Boolean {
+        val current = _viewState.value
+        val isSwitch = result.isServerUrlSwitch &&
+            current.serverId == result.serverId &&
+            result.url.toUri().hasSameOrigin(current.url)
+        if (!isSwitch) return false
+        Timber.i("Server URL switch in state ${current.logDescription()}")
+        if (current is FrontendViewState.Content || current is FrontendViewState.Loading) {
+            prepareUrlLoad(urlManager.toRealUrl(result.url))
+            urlManager.announceServerUrlSwitch(result.serverId)
+        } else {
+            startLoad(result.serverId)
+        }
+        return true
+    }
+
+    /**
      * Handles URL load results from the URL manager.
      *
      * @param result The URL load result to handle
@@ -1030,18 +1055,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
     private suspend fun handleUrlResult(result: UrlLoadResult) {
         when (result) {
             is UrlLoadResult.Success -> {
-                val current = _viewState.value
-                if (result.isServerUrlSwitch && current.serverId == result.serverId && result.url.toUri().hasSameOrigin(current.url)) {
-                    // The page stays on the same app-internal origin: requests already go to the new server
-                    // URL and the page moves its WebSockets there, so only a page that is not showing reloads.
-                    if (current is FrontendViewState.Content || current is FrontendViewState.Loading) {
-                        prepareUrlLoad(urlManager.toRealUrl(result.url))
-                        urlManager.announceServerUrlSwitch(result.serverId)
-                    } else {
-                        startLoad(result.serverId)
-                    }
-                    return
-                }
+                if (handleServerUrlSwitch(result)) return
                 pendingMoreInfoEntityId = result.moreInfoEntityId
                 _viewState.update { currentState ->
                     FrontendViewState.Loading(
@@ -1138,7 +1152,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
         viewModelScope.launch { externalBusRepository.send(NavigateToMessage(path = path)) }
     }
 
-        private fun onUrlIntercepted(uri: Uri): Boolean {
+    private fun onUrlIntercepted(uri: Uri): Boolean {
         val rawUrl = uri.toString()
         val serverLink = urlManager.toVirtualUrl(_viewState.value.serverId, rawUrl)
         return when {

@@ -20,7 +20,7 @@ import io.homeassistant.companion.android.common.R as commonR
 import io.homeassistant.companion.android.common.data.keychain.ClientCertProvider
 import io.homeassistant.companion.android.common.data.keychain.KeyChainRepository
 import io.homeassistant.companion.android.frontend.error.FrontendConnectionError
-import io.homeassistant.companion.android.frontend.upstream.FrontendUpstream
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstreamHttp
 import java.lang.ref.WeakReference
 import javax.inject.Inject
 import kotlinx.coroutines.flow.StateFlow
@@ -52,7 +52,7 @@ private val HISTORY_CHANGED_SCRIPT = """
  */
 class HAWebViewClientFactory @Inject constructor(
     private val keyChainRepository: KeyChainRepository,
-    private val upstream: FrontendUpstream,
+    private val upstream: FrontendUpstreamHttp,
 ) {
     /**
      * Creates a new [HAWebViewClient] with the specified configuration.
@@ -114,6 +114,7 @@ class HAWebViewClientFactory @Inject constructor(
  * Handles error mapping to [FrontendConnectionError], TLS client authentication, and crash recovery.
  * Use [HAWebViewClientFactory] to create instances.
  */
+@Suppress("TooManyFunctions") // WebViewClient callbacks: each override is one WebView event
 class HAWebViewClient internal constructor(
     keyChainRepository: KeyChainRepository,
     clientCertProvider: ClientCertProvider,
@@ -127,7 +128,7 @@ class HAWebViewClient internal constructor(
     )?,
     private val onCanGoBackChanged: ((canGoBack: Boolean) -> Unit)? = null,
     private val onSubresourceSslError: ((url: String?) -> Unit)? = null,
-    private val upstream: FrontendUpstream? = null,
+    private val upstream: FrontendUpstreamHttp? = null,
 ) : TLSWebViewClient(keyChainRepository, clientCertProvider) {
 
     /** Serves the app-internal frontend origin from the current server, see [FrontendUpstream]. */

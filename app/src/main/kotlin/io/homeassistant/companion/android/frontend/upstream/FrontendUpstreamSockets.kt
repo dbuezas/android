@@ -5,8 +5,8 @@ import androidx.annotation.MainThread
 import androidx.webkit.JavaScriptReplyProxy
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -29,7 +29,11 @@ private val json = Json { encodeDefaults = true }
  * Text frames travel as JSON messages; binary frames as raw bytes prefixed with the socket id when the
  * WebView supports binary messages ([binary]), otherwise base64 in JSON.
  */
-internal class FrontendUpstreamSockets(private val scope: CoroutineScope, private val binary: Boolean) {
+internal class FrontendUpstreamSockets(
+    private val scope: CoroutineScope,
+    private val mainDispatcher: CoroutineDispatcher,
+    private val binary: Boolean,
+) {
     private val sockets = ConcurrentHashMap<String, WebSocket>()
 
     @Serializable
@@ -48,21 +52,30 @@ internal class FrontendUpstreamSockets(private val scope: CoroutineScope, privat
     fun open(replyProxy: JavaScriptReplyProxy, sid: Int, connect: (WebSocketListener) -> WebSocket?) {
         val key = key(replyProxy, sid)
         val post: (SocketEvent) -> Unit = { event ->
-            scope.launch(Dispatchers.Main) { replyProxy.postMessage(json.encodeToString(event)) }
+            scope.launch(mainDispatcher) { replyProxy.postMessage(json.encodeToString(event)) }
         }
         val socket = connect(
             object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) =
                     post(SocketEvent("wsOpened", sid, protocol = response.header("Sec-WebSocket-Protocol").orEmpty()))
 
-                override fun onMessage(webSocket: WebSocket, text: String) = post(SocketEvent("wsText", sid, text = text))
+                override fun onMessage(webSocket: WebSocket, text: String) =
+                    post(SocketEvent("wsText", sid, text = text))
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                     if (binary) {
-                        val framed = ByteBuffer.allocate(SOCKET_ID_BYTES + bytes.size).putInt(sid).put(bytes.asByteBuffer()).array()
-                        scope.launch(Dispatchers.Main) { replyProxy.postMessage(framed) }
+                        val framed = ByteBuffer.allocate(
+                            SOCKET_ID_BYTES + bytes.size,
+                        ).putInt(sid).put(bytes.asByteBuffer()).array()
+                        scope.launch(mainDispatcher) { replyProxy.postMessage(framed) }
                     } else {
-                        post(SocketEvent("wsText", sid, b64 = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)))
+                        post(
+                            SocketEvent(
+                                "wsText",
+                                sid,
+                                b64 = Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP),
+                            ),
+                        )
                     }
                 }
 
@@ -81,13 +94,28 @@ internal class FrontendUpstreamSockets(private val scope: CoroutineScope, privat
                 }
             },
         )
-        if (socket == null) post(SocketEvent("wsClosed", sid, code = ABNORMAL_CLOSURE, reason = "Unknown server")) else sockets[key] = socket
+        if (socket ==
+            null
+        ) {
+            post(SocketEvent("wsClosed", sid, code = ABNORMAL_CLOSURE, reason = "Unknown server"))
+        } else {
+            sockets[key] =
+                socket
+        }
     }
 
     /** Sends a text frame (or a base64 binary frame) from the page. */
     fun send(replyProxy: JavaScriptReplyProxy, sid: Int, text: String?, base64: String?) {
         val socket = sockets[key(replyProxy, sid)] ?: return
-        if (text != null) socket.send(text) else if (base64 != null) socket.send(Base64.decode(base64, Base64.NO_WRAP).toByteString())
+        if (text !=
+            null
+        ) {
+            socket.send(text)
+        } else if (base64 !=
+            null
+        ) {
+            socket.send(Base64.decode(base64, Base64.NO_WRAP).toByteString())
+        }
     }
 
     /** Sends a binary frame from the page: the socket id, then the payload. */
@@ -103,7 +131,13 @@ internal class FrontendUpstreamSockets(private val scope: CoroutineScope, privat
     }
 
     /** Close codes a client may send; others (such as 1005 or 1006) are only ever reported. */
-    private fun sendableCode(code: Int) = if (code == NORMAL_CLOSURE || code in APPLICATION_CODES) code else NORMAL_CLOSURE
+    private fun sendableCode(code: Int) = if (code == NORMAL_CLOSURE ||
+        code in APPLICATION_CODES
+    ) {
+        code
+    } else {
+        NORMAL_CLOSURE
+    }
 
     private fun key(replyProxy: JavaScriptReplyProxy, sid: Int) = "${System.identityHashCode(replyProxy)}:$sid"
 

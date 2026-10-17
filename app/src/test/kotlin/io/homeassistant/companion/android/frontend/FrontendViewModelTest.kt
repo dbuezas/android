@@ -111,7 +111,12 @@ class FrontendViewModelTest {
     private val webViewClientFactory: HAWebViewClientFactory = mockk(relaxed = true)
     private val frontendBusObserver: FrontendBusObserver = mockk(relaxed = true)
     private val externalBusRepository: FrontendExternalBusRepository = mockk(relaxed = true)
-    private val urlManager: FrontendUrlManager = mockk(relaxed = true)
+    private val urlManager: FrontendUrlManager = mockk(relaxed = true) {
+        // URLs stay the real server URLs, as without WebView support for the app-internal origin
+        every { toRealUrl(any()) } answers { firstArg() }
+        every { toVirtualUrl(any(), any()) } returns null
+        every { serverUrlMoves } returns emptyFlow()
+    }
     private val connectivityCheckRepository: ConnectivityCheckRepository = mockk(relaxed = true)
     private val permissionManager: PermissionManager = mockk(relaxed = true)
     private val frontendJsBridgeFactory: FrontendJsBridgeFactory = mockk(relaxed = true)
