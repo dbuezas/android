@@ -21,6 +21,7 @@ import io.homeassistant.companion.android.common.data.keychain.ClientCertProvide
 import io.homeassistant.companion.android.common.data.keychain.KeyChainRepository
 import io.homeassistant.companion.android.frontend.error.FrontendConnectionError
 import io.homeassistant.companion.android.frontend.upstream.FrontendUpstreamHttp
+import io.homeassistant.companion.android.frontend.upstream.UPSTREAM_ERROR_HEADER
 import java.lang.ref.WeakReference
 import javax.inject.Inject
 import kotlinx.coroutines.flow.StateFlow
@@ -131,7 +132,7 @@ class HAWebViewClient internal constructor(
     private val upstream: FrontendUpstreamHttp? = null,
 ) : TLSWebViewClient(keyChainRepository, clientCertProvider) {
 
-    /** Serves the app-internal frontend origin from the current server, see [FrontendUpstream]. */
+    /** Serves the app-internal frontend origin from the current server, see [FrontendUpstreamHttp]. */
     override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
         if (request != null) upstream?.intercept(request)?.let { return it }
         return super.shouldInterceptRequest(view, request)
@@ -196,8 +197,11 @@ class HAWebViewClient internal constructor(
             error?.description?.toString(),
         )
         Timber.e("onReceivedError: $errorDetails")
+        onFrontendError(errorFor(error?.errorCode, errorDetails))
+    }
 
-        val frontendConnectionError = when (error?.errorCode) {
+    private fun errorFor(errorCode: Int?, errorDetails: String): FrontendConnectionError {
+        return when (errorCode) {
             ERROR_FAILED_SSL_HANDSHAKE -> FrontendConnectionError.SslError(
                 message = commonR.string.webview_error_FAILED_SSL_HANDSHAKE,
                 errorDetails = errorDetails,
@@ -244,7 +248,6 @@ class HAWebViewClient internal constructor(
                 rawErrorType = WebResourceError::class.toString(),
             )
         }
-        onFrontendError(frontendConnectionError)
     }
 
     override fun onReceivedHttpError(
@@ -263,6 +266,15 @@ class HAWebViewClient internal constructor(
             errorResponse?.reasonPhrase,
         )
         Timber.e("onReceivedHttpError: $errorDetails")
+
+        // A failed load of the app-internal origin carries the network error behind it
+        val upstreamError = errorResponse?.responseHeaders
+            ?.entries?.firstOrNull { it.key.equals(UPSTREAM_ERROR_HEADER, ignoreCase = true) }
+            ?.value?.toIntOrNull()
+        if (upstreamError != null) {
+            onFrontendError(errorFor(upstreamError, errorDetails))
+            return
+        }
 
         val frontendConnectionError = when {
             isTLSClientAuthNeeded && !isCertificateChainValid -> FrontendConnectionError.TlsCertExpired(

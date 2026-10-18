@@ -111,6 +111,7 @@ private val bridgeMessageJson = Json(frontendExternalBusJson) {
  * @param serverManager Used to check server version for V2 protocol support
  * @param scope Coroutine scope for launching async operations from synchronous JS calls
  * @param stateProvider Provides the current server ID and URL from the ViewModel state
+ * @param upstreamChannel Adds the app-internal frontend origin's page script and channel, see [FrontendUpstreamChannel]
  */
 class FrontendJsBridge @AssistedInject constructor(
     private val handler: FrontendJsHandler,
@@ -132,8 +133,9 @@ class FrontendJsBridge @AssistedInject constructor(
      */
     @SuppressLint("RequiresFeature")
     override suspend fun attachToWebView(webView: WebView) {
-        upstreamChannel.attach(webView, scope)
-        val useV2 = serverManager.getServer(stateProvider().serverId).isServerSupportingExternalAppV2()
+        val server = serverManager.getServer(stateProvider().serverId)
+        upstreamChannel.attach(webView, scope, allowPlainHttp = server?.connection?.hasPlainTextUrl == true)
+        val useV2 = server.isServerSupportingExternalAppV2()
         val webMessageListenerSupported = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
         if (useV2 && webMessageListenerSupported) {
             webView.removeJavascriptInterface(EXTERNAL_APP_V1)

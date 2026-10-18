@@ -1,5 +1,6 @@
 package io.homeassistant.companion.android.frontend.upstream
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.widget.Toast
 import androidx.annotation.MainThread
@@ -32,6 +33,7 @@ import timber.log.Timber
  * ([FrontendUpstreamChannel]) moves the page's Home Assistant WebSocket to a new server URL before it lets
  * go of the old one.
  */
+@Suppress("TooManyFunctions") // the one place that maps between both origins of each server
 @Singleton
 class FrontendUpstream @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -44,14 +46,34 @@ class FrontendUpstream @Inject constructor(
     private val pages = HashMap<Int, MutableSet<JavaScriptReplyProxy>>()
 
     private val _moves = MutableSharedFlow<Int>(extraBufferCapacity = 1)
+    private val _realUrlFallbacks = MutableSharedFlow<Int>(extraBufferCapacity = 1)
+
+    /** Servers whose frontend needs the WebView's own loads (HTTP authentication), see [useRealUrl]. */
+    private val realUrlServers = ConcurrentHashMap.newKeySet<Int>()
 
     /** Ids of servers whose open page just moved its WebSocket to a new server URL. */
     val moves: SharedFlow<Int> = _moves.asSharedFlow()
+
+    /** Ids of servers that must now load their real URL instead, see [useRealUrl]. */
+    val realUrlFallbacks: SharedFlow<Int> = _realUrlFallbacks.asSharedFlow()
 
     /** Whether the WebView supports what the virtual origin needs; without it the real URL is loaded. */
     val isSupported: Boolean
         get() = WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT) &&
             WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+
+    /** Whether the frontend of [serverId] runs on the app-internal origin. */
+    fun usesVirtualOrigin(serverId: Int): Boolean = isSupported && serverId !in realUrlServers
+
+    /**
+     * Makes [serverId] load its real URL from now on: its server (or a proxy before it) asks for HTTP
+     * authentication or sends the frontend to another site, which only the WebView's own loads handle.
+     */
+    internal fun useRealUrl(serverId: Int) {
+        if (!realUrlServers.add(serverId)) return
+        Timber.i("Server $serverId needs the WebView's own loads, loading its real URL")
+        _realUrlFallbacks.tryEmit(serverId)
+    }
 
     /**
      * Makes [realUrl]'s origin the server URL in use for [serverId] and returns the same URL on the virtual
@@ -65,6 +87,8 @@ class FrontendUpstream @Inject constructor(
     }
 
     /** Tells the open pages of [serverId] to move their WebSocket to the server URL set by [useServerUrl]. */
+    // Reply proxies only exist where FrontendUpstreamChannel.attach found WEB_MESSAGE_LISTENER
+    @SuppressLint("RequiresFeature")
     @MainThread
     fun announceSwitch(serverId: Int) {
         val base = bases[serverId] ?: run {
@@ -92,6 +116,11 @@ class FrontendUpstream @Inject constructor(
         }
     }
 
+    /** [url] with a virtual host replaced by the host of the server URL in use, keeping scheme and port, or null for other URLs. */
+    fun toRealHost(url: String): String? = url.toHttpUrlOrNull()?.let { parsed ->
+        baseFor(parsed.host)?.let { base -> parsed.newBuilder().host(base.host).build().toString() }
+    }
+
     /** Remembers the URLs of [serverId], to recognize links to the server's own addresses. */
     fun rememberConnection(serverId: Int, connection: ServerConnectionInfo) {
         connections[serverId] = connection
@@ -106,6 +135,8 @@ class FrontendUpstream @Inject constructor(
         ?.let { VirtualOrigin.of(it, serverId).toString() }
 
     /** Registers a page that just started on a virtual origin and tells it where its WebSockets go. */
+    // Reply proxies only exist where FrontendUpstreamChannel.attach found WEB_MESSAGE_LISTENER
+    @SuppressLint("RequiresFeature")
     @MainThread
     internal suspend fun onPageHello(host: String, replyProxy: JavaScriptReplyProxy, binary: Boolean) {
         val serverId = VirtualOrigin.serverIdOf(host) ?: return

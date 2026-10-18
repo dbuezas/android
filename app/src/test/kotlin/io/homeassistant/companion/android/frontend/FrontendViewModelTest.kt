@@ -116,6 +116,8 @@ class FrontendViewModelTest {
         every { toRealUrl(any()) } answers { firstArg() }
         every { toVirtualUrl(any(), any()) } returns null
         every { serverUrlMoves } returns emptyFlow()
+        every { realUrlFallbacks } returns emptyFlow()
+        every { toRealHost(any()) } returns null
     }
     private val connectivityCheckRepository: ConnectivityCheckRepository = mockk(relaxed = true)
     private val permissionManager: PermissionManager = mockk(relaxed = true)
@@ -2346,7 +2348,7 @@ class FrontendViewModelTest {
                 UrlLoadResult.Success(url = testUrlWithAuth, serverId = serverId),
             )
             coEvery {
-                downloadManager.downloadFile(any(), any(), any(), any())
+                downloadManager.downloadFile(any(), any(), any(), any(), any())
             } returns DownloadResult.Error(messageResId = commonR.string.downloads_failed)
 
             val viewModel = createViewModel()
@@ -2375,7 +2377,7 @@ class FrontendViewModelTest {
                 UrlLoadResult.Success(url = testUrlWithAuth, serverId = serverId),
             )
             coEvery {
-                downloadManager.downloadFile(any(), any(), any(), any())
+                downloadManager.downloadFile(any(), any(), any(), any(), any())
             } returns DownloadResult.OpenWithSystem(uri = testUri)
 
             val viewModel = createViewModel()
@@ -2401,7 +2403,7 @@ class FrontendViewModelTest {
                 UrlLoadResult.Success(url = testUrlWithAuth, serverId = serverId),
             )
             coEvery {
-                downloadManager.downloadFile(any(), any(), any(), any())
+                downloadManager.downloadFile(any(), any(), any(), any(), any())
             } returns DownloadResult.Forwarded
 
             val viewModel = createViewModel()
@@ -2426,7 +2428,7 @@ class FrontendViewModelTest {
                 UrlLoadResult.Success(url = testUrlWithAuth, serverId = serverId),
             )
             coEvery {
-                downloadManager.downloadFile(any(), any(), any(), any())
+                downloadManager.downloadFile(any(), any(), any(), any(), any())
             } returns DownloadResult.Forwarded
 
             val viewModel = createViewModel()
@@ -2445,6 +2447,7 @@ class FrontendViewModelTest {
                     contentDisposition = "attachment",
                     mimetype = "application/pdf",
                     serverId = serverId,
+                    cookieUrl = "https://example.com/file.pdf",
                 )
             }
         }
@@ -2466,7 +2469,7 @@ class FrontendViewModelTest {
             )
             advanceUntilIdle()
 
-            coVerify(exactly = 0) { downloadManager.downloadFile(any(), any(), any(), any()) }
+            coVerify(exactly = 0) { downloadManager.downloadFile(any(), any(), any(), any(), any()) }
         }
 
         @Test
@@ -2475,7 +2478,7 @@ class FrontendViewModelTest {
                 UrlLoadResult.Success(url = testUrlWithAuth, serverId = serverId),
             )
             coEvery { permissionManager.checkStoragePermissionForDownload() } returns true
-            coEvery { downloadManager.downloadFile(any(), any(), any(), any()) } returns DownloadResult.Forwarded
+            coEvery { downloadManager.downloadFile(any(), any(), any(), any(), any()) } returns DownloadResult.Forwarded
 
             val viewModel = createViewModel()
             advanceTimeBy(CONNECTION_TIMEOUT - 1.seconds)
@@ -2493,6 +2496,7 @@ class FrontendViewModelTest {
                     contentDisposition = "attachment",
                     mimetype = "application/pdf",
                     serverId = serverId,
+                    cookieUrl = "https://example.com/file.pdf",
                 )
             }
         }
@@ -3466,6 +3470,86 @@ class FrontendViewModelTest {
 
             webViewJob.cancel()
             viewModelJob.cancel()
+        }
+    }
+
+    @Nested
+    inner class ServerUrlSwitch {
+        private val urls = MutableSharedFlow<UrlLoadResult>()
+        private val messages = MutableSharedFlow<FrontendHandlerEvent>()
+
+        private fun TestScope.showContent(): FrontendViewModel {
+            coEvery { keyChainRepository.getClientCertProvider() } returns object : ClientCertProvider {
+                override val certificate: ClientCertificate? = null
+            }
+            every { frontendBusObserver.messageResults() } returns messages
+            every { urlManager.serverUrlFlow(any(), any()) } returns urls
+            val viewModel = createViewModel()
+            runCurrent()
+            return viewModel
+        }
+
+        private suspend fun TestScope.load(connected: Boolean) {
+            urls.emit(UrlLoadResult.Success(url = testUrlWithAuth, serverId = serverId))
+            runCurrent()
+            if (connected) messages.emit(FrontendHandlerEvent.Connected)
+            runCurrent()
+        }
+
+        private suspend fun TestScope.switch() {
+            urls.emit(UrlLoadResult.Success(url = testUrlWithAuth, serverId = serverId, isServerUrlSwitch = true))
+            runCurrent()
+        }
+
+        @Test
+        fun `Given content when the server URL switches then the page is told without a reload`() = runTest {
+            val viewModel = showContent()
+            load(connected = true)
+            assertInstanceOf(FrontendViewState.Content::class.java, viewModel.viewState.value)
+
+            switch()
+
+            assertInstanceOf(FrontendViewState.Content::class.java, viewModel.viewState.value)
+            verify(exactly = 1) { urlManager.announceServerUrlSwitch(serverId) }
+            verify(exactly = 1) { urlManager.serverUrlFlow(any(), any()) }
+        }
+
+        @Test
+        fun `Given a hidden screen when the server URL switches then the page is told once the screen shows again`() = runTest {
+            val viewModel = showContent()
+            load(connected = true)
+            viewModel.onScreenStartedChanged(false)
+
+            switch()
+            verify(exactly = 0) { urlManager.announceServerUrlSwitch(any()) }
+
+            viewModel.onScreenStartedChanged(true)
+            runCurrent()
+            verify(exactly = 1) { urlManager.announceServerUrlSwitch(serverId) }
+        }
+
+        @Test
+        fun `Given a page still connecting when the server URL switches then it is loaded again`() = runTest {
+            showContent()
+            load(connected = false)
+
+            switch()
+
+            verify(exactly = 0) { urlManager.announceServerUrlSwitch(any()) }
+            verify(exactly = 2) { urlManager.serverUrlFlow(any(), any()) }
+        }
+
+        @Test
+        fun `Given a server that needs the WebView's own loads when it is reported then its real URL is loaded`() = runTest {
+            val fallbacks = MutableSharedFlow<Int>()
+            every { urlManager.realUrlFallbacks } returns fallbacks
+            showContent()
+            load(connected = false)
+
+            fallbacks.emit(serverId)
+            runCurrent()
+
+            verify(exactly = 2) { urlManager.serverUrlFlow(any(), any()) }
         }
     }
 }

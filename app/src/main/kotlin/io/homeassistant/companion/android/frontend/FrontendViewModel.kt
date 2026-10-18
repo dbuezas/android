@@ -94,6 +94,9 @@ private const val APP_PREFIX = "app://"
 private const val INTENT_PREFIX = "intent:"
 private const val SECURITY_ALERT_URL = "https://www.home-assistant.io/latest-security-alert/"
 
+/** Served by the server itself, not pages of the frontend. */
+private val SERVER_FILE_PATHS = listOf("/api/", "/local/", "/auth/", "/static/", "/media/", "/hacsfiles/")
+
 /**
  * URLs that must NOT trigger the "always show first view on app start" navigation.
  *
@@ -244,10 +247,17 @@ internal class FrontendViewModel @VisibleForTesting constructor(
      */
     private var latestSafeAreaInsets: SafeAreaInsets? = null
 
-    override val urlFlow: StateFlow<String?> =
+    /** The URL the WebView shows, on the app-internal origin when it is used. */
+    private val pageUrlFlow: StateFlow<String?> =
         _viewState.map { it.url }
             .distinctUntilChanged()
             .stateIn(viewModelScope, SharingStarted.Eagerly, _viewState.value.url)
+
+    /** The server URL being connected to, as shown on the error screen. */
+    override val urlFlow: StateFlow<String?> =
+        _viewState.map { urlManager.toRealUrl(it.url) }
+            .distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.Eagerly, urlManager.toRealUrl(_viewState.value.url))
 
     override val errorFlow: StateFlow<FrontendConnectionError?> =
         _viewState.map { state -> (state as? FrontendViewState.Error)?.error }
@@ -266,7 +276,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
 
     private val webViewClient = SuspendLazy {
         webViewClientFactory.create(
-            currentUrlFlow = urlFlow,
+            currentUrlFlow = pageUrlFlow,
             onFrontendError = ::onError,
             onCrash = ::onRetry,
             onPageFinished = ::onPageFinished,
@@ -421,6 +431,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
 
     init {
         collectServerUrlMoves()
+        collectRealUrlFallbacks()
         viewModelScope.launch {
             _viewState.collect { state ->
                 Timber.d("Frontend state: ${state.logDescription()}")
@@ -665,6 +676,8 @@ internal class FrontendViewModel @VisibleForTesting constructor(
                 contentDisposition = contentDisposition,
                 mimetype = mimetype,
                 serverId = viewState.value.serverId,
+                // The page's cookies (ingress sessions) live under the app-internal origin
+                cookieUrl = url,
             )
             handleDownloadResult(result)
         }
@@ -865,6 +878,16 @@ internal class FrontendViewModel @VisibleForTesting constructor(
                     commonR.string.frontend_switched_to_external_url
                 }
                 _events.emit(FrontendEvent.ShowSnackbar(message))
+            }
+        }
+    }
+
+    /** Loads the real URL of a server whose frontend cannot run on the app-internal origin. */
+    private fun collectRealUrlFallbacks() {
+        viewModelScope.launch {
+            urlManager.realUrlFallbacks.collect { serverId ->
+                val current = _viewState.value
+                if (serverId == current.serverId) startLoad(serverId, current.pendingTarget)
             }
         }
     }
@@ -1070,6 +1093,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
                 // A page behind another screen is frozen (back-forward cache): its move would time out
                 isScreenStarted.first { it }
                 urlManager.announceServerUrlSwitch(result.serverId)
+                exoPlayerManager.onServerUrlSwitched()
             }
         } else {
             // A page still connecting, or not showing, is loaded again
@@ -1168,24 +1192,39 @@ internal class FrontendViewModel @VisibleForTesting constructor(
     }
 
     /**
+     * Opens [link], to one of the server's own addresses, inside the frontend at its [virtual] path.
+     * Files the server serves itself open externally; servers before 2025.6 load the path again.
+     */
+    private fun openServerLink(link: Uri, virtual: Uri) {
+        val serverId = _viewState.value.serverId
+        val path = virtual.encodedPath.orEmpty() + virtual.encodedQuery?.let { "?$it" }.orEmpty() +
+            virtual.encodedFragment?.let { "#$it" }.orEmpty()
+        viewModelScope.launch {
+            when {
+                SERVER_FILE_PATHS.any { virtual.encodedPath.orEmpty().startsWith(it) } ->
+                    _events.emit(FrontendEvent.OpenExternalLink(link))
+                NavigateToMessage.isAvailable(serverManager.getServer(serverId)?.version) ->
+                    externalBusRepository.send(NavigateToMessage(path = path))
+                else -> startLoad(serverId = serverId, target = FrontendTarget.Path(path))
+            }
+        }
+    }
+
+    /**
      * Handles a URL the WebView is about to load.
      *
      * Custom schemes (`app://`, `intent:`) and URLs that do not match the current server origin are
      * routed to the host through [FrontendEvent]s, while same-origin URLs are left for the WebView.
-     * The origin comparison uses scheme, host and port (see [hasSameOrigin]).
+     * The origin comparison uses scheme, host and port (see [hasSameOrigin]). Links to one of the
+     * server's own addresses (internal, external or cloud) open inside the frontend.
      *
      * @return `true` when the URL was intercepted (the host will handle it), `false` to let the WebView load it.
      */
-    /** Navigates the frontend to [target]'s path without reloading it. */
-    private fun navigateInFrontend(target: Uri) {
-        val path = target.encodedPath.orEmpty() + target.encodedQuery?.let { "?$it" }.orEmpty() +
-            target.encodedFragment?.let { "#$it" }.orEmpty()
-        viewModelScope.launch { externalBusRepository.send(NavigateToMessage(path = path)) }
-    }
-
     private fun onUrlIntercepted(uri: Uri): Boolean {
         val rawUrl = uri.toString()
         val serverLink = urlManager.toVirtualUrl(_viewState.value.serverId, rawUrl)
+        // Add-on web UIs without ingress: Home Assistant builds that link from the page's host name
+        val realHostLink = urlManager.toRealHost(rawUrl)
         return when {
             rawUrl.startsWith(APP_PREFIX) -> {
                 _events.tryEmit(FrontendEvent.LaunchApp(rawUrl.substringAfter(APP_PREFIX)))
@@ -1197,11 +1236,16 @@ internal class FrontendViewModel @VisibleForTesting constructor(
                 true
             }
 
-            uri.hasSameOrigin(urlFlow.value) -> false
+            uri.hasSameOrigin(pageUrlFlow.value) -> false
 
             // A link to one of the server's own addresses stays in the app, on its internal origin
             serverLink != null -> {
-                navigateInFrontend(serverLink.toUri())
+                openServerLink(uri, serverLink.toUri())
+                true
+            }
+
+            realHostLink != null -> {
+                _events.tryEmit(FrontendEvent.OpenExternalLink(realHostLink.toUri()))
                 true
             }
 

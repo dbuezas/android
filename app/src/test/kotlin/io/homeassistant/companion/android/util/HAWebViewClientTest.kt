@@ -189,6 +189,7 @@ class HAWebViewClientTest {
         val response = mockk<WebResourceResponse> {
             every { statusCode } returns 400
             every { reasonPhrase } returns "Bad Request"
+            every { responseHeaders } returns emptyMap()
         }
 
         webViewClient.isTLSClientAuthNeeded = true
@@ -212,6 +213,7 @@ class HAWebViewClientTest {
         val response = mockk<WebResourceResponse> {
             every { statusCode } returns 418
             every { reasonPhrase } returns "I'm a teapot"
+            every { responseHeaders } returns emptyMap()
         }
 
         webViewClient.isTLSClientAuthNeeded = false
@@ -226,6 +228,23 @@ class HAWebViewClientTest {
     }
 
     @Test
+    fun `Given a failed load of the app-internal origin when onReceivedHttpError then the network error is reported`() {
+        val webView = mockWebView()
+        val currentUrl = "https://server-1.homeassistant.internal/?external_auth=1"
+        currentUrlFlow.value = currentUrl
+        val request = mockRequest(currentUrl)
+        val response = mockk<WebResourceResponse> {
+            every { statusCode } returns 502
+            every { reasonPhrase } returns "Bad Gateway"
+            every { responseHeaders } returns mapOf("X-Frontend-Upstream-Error" to ERROR_TIMEOUT.toString())
+        }
+
+        webViewClient.onReceivedHttpError(webView, request, response)
+
+        assertTrue(capturedError is FrontendConnectionError.Timeout)
+    }
+
+    @Test
     fun `Given HTTP error without reason when onReceivedHttpError then emits Unknown with no description`() {
         val webView = mockWebView()
         val currentUrl = "http://homeassistant.local:8123/auth/authorize"
@@ -234,6 +253,7 @@ class HAWebViewClientTest {
         val response = mockk<WebResourceResponse> {
             every { statusCode } returns 500
             every { reasonPhrase } returns ""
+            every { responseHeaders } returns emptyMap()
         }
 
         webViewClient.isTLSClientAuthNeeded = false
@@ -255,6 +275,7 @@ class HAWebViewClientTest {
         val response = mockk<WebResourceResponse> {
             every { statusCode } returns 500
             every { reasonPhrase } returns "Server Error"
+            every { responseHeaders } returns emptyMap()
         }
 
         webViewClient.onReceivedHttpError(webView, request, response)

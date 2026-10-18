@@ -127,5 +127,17 @@ class FrontendUpstreamTest {
         assertNull(VirtualOrigin.serverIdOf("homeassistant.local"))
         assertNull(VirtualOrigin.serverIdOf("server-x.homeassistant.internal"))
         assertNull(VirtualOrigin.serverIdOf(null))
+        assertNull(VirtualOrigin.serverIdOf("server-01.homeassistant.internal"))
+        assertNull(VirtualOrigin.serverIdOf("server-+1.homeassistant.internal"))
+        assertNull(VirtualOrigin.serverIdOf("server--1.homeassistant.internal"))
+        assertNull(VirtualOrigin.serverIdOf("1.homeassistant.internal"))
+    }
+
+    @Test
+    fun `Given an add-on web UI link on the virtual host when mapping it then the server's host is used with its own port`() {
+        upstream.useServerUrl(1, "http://192.168.1.2:8123/".toHttpUrl())
+
+        assertEquals("http://192.168.1.2:8080/", upstream.toRealHost("http://server-1.homeassistant.internal:8080/"))
+        assertNull(upstream.toRealHost("https://www.home-assistant.io/"))
     }
 }

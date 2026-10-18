@@ -53,6 +53,9 @@ class FrontendExoPlayerManager @VisibleForTesting constructor(
 
     private var player: ExoPlayer? = null
 
+    /** The stream playing, as the frontend asked for it. */
+    private var playingUrl: Uri? = null
+
     private val _state = MutableStateFlow<ExoPlayerUiState?>(null)
     val state: StateFlow<ExoPlayerUiState?> = _state.asStateFlow()
 
@@ -76,6 +79,7 @@ class FrontendExoPlayerManager @VisibleForTesting constructor(
         val exoPlayer = getOrCreatePlayer()
         exoPlayer.stop()
         // The frontend builds the URL from its own origin, which may be the app-internal one
+        playingUrl = url
         exoPlayer.setMediaItem(MediaItem.fromUri(toRealUrl(url.toString())))
         exoPlayer.playWhenReady = true
         exoPlayer.volume = if (muted) 0f else 1f
@@ -122,7 +126,16 @@ class FrontendExoPlayerManager @VisibleForTesting constructor(
     /**
      * Releases the player and clears state. Safe to call multiple times.
      */
+    /** Plays the current stream again from the server URL now in use, after a switch without reload. */
+    fun onServerUrlSwitched() {
+        val exoPlayer = player ?: return
+        val url = playingUrl ?: return
+        exoPlayer.setMediaItem(MediaItem.fromUri(toRealUrl(url.toString())))
+        exoPlayer.prepare()
+    }
+
     override fun close() {
+        playingUrl = null
         player?.release()
         player = null
         _state.value = null

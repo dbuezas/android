@@ -11,6 +11,7 @@ import io.homeassistant.companion.android.BuildConfig
 import io.homeassistant.companion.android.common.R as commonR
 import io.homeassistant.companion.android.common.data.prefs.PrefsRepository
 import io.homeassistant.companion.android.common.data.servers.ServerManager
+import io.homeassistant.companion.android.frontend.upstream.FrontendUpstreamHttp
 import io.homeassistant.companion.android.thread.ThreadManager
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -27,6 +28,7 @@ class DeveloperSettingsPresenterImpl @Inject constructor(
     private val prefsRepository: PrefsRepository,
     private val serverManager: ServerManager,
     private val threadManager: ThreadManager,
+    private val frontendUpstreamHttp: FrontendUpstreamHttp,
 ) : PreferenceDataStore(),
     DeveloperSettingsPresenter {
 
@@ -162,6 +164,8 @@ class DeveloperSettingsPresenterImpl @Inject constructor(
 
         try {
             WebStorageCompat.deleteBrowsingData(WebStorage.getInstance(), Dispatchers.IO.asExecutor()) {
+                // The app-internal frontend origin is served from its own cache
+                frontendUpstreamHttp.clearCache()
                 view.onWebViewClearCacheResult(success = true)
             }
         } catch (e: RuntimeException) {

@@ -14,6 +14,8 @@ sealed interface UrlLoadResult {
      * @property moreInfoEntityId When non-null, the more-info dialog for this entity must be opened
      *   via JavaScript once the page has loaded. Used as a fallback for servers older than HA 2025.6,
      *   which ignore the `more-info-entity-id` URL parameter.
+     * @property isServerUrlSwitch true when this URL replaces the one loaded before for the same server (a
+     *   switch between its internal and external URL), so an open page can keep running
      */
     data class Success(
         val url: String,

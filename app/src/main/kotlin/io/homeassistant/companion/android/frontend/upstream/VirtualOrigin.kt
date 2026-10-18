@@ -20,10 +20,10 @@ internal object VirtualOrigin {
 
     /** The server id of a virtual [host], or null for any other host. */
     fun serverIdOf(host: String?): Int? = host
-        ?.takeIf { it.endsWith(".$DOMAIN") }
         ?.removeSuffix(".$DOMAIN")
         ?.removePrefix(HOST_PREFIX)
         ?.toIntOrNull()
+        ?.takeIf { it >= 0 && hostFor(it) == host }
 
     /** [url] with its origin replaced by the virtual origin of [serverId]. */
     fun of(url: HttpUrl, serverId: Int): HttpUrl =

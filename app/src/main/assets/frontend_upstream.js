@@ -22,6 +22,9 @@
   const DRAIN_TIMEOUT_MS = 1500;
   const DRAIN_POLL_MS = 50;
   const CHUNK_BYTES = 512 * 1024;
+  const SOCKET_ID_BYTES = 4;
+  const NORMAL_CLOSURE = 1000;
+  const ABNORMAL_CLOSURE = 1006;
 
   const NativeWebSocket = window.WebSocket;
   const nativeFetch = window.fetch.bind(window);
@@ -47,7 +50,7 @@
   };
 
   const toUpstream = (raw) => {
-    const url = new URL(raw, location.href);
+    const url = new URL(raw, document.baseURI);
     if (url.host !== location.host) return url.href;
     const base = new URL(wsBase);
     url.protocol = base.protocol;
@@ -66,13 +69,12 @@
   class ProxySocket extends EventTarget {
     constructor(url, protocols) {
       super();
-      this._url = new URL(url, location.href).href;
+      this._url = new URL(url, document.baseURI).href;
       this._protocols = protocols;
       this._closed = false;
       this._opened = false;
       this._native = null;
       this._binaryType = 'blob';
-      this.onopen = this.onmessage = this.onerror = this.onclose = null;
       sockets.add(this);
       if (wsBase) this._start(); else waiting.push(this);
     }
@@ -82,8 +84,6 @@
       const event = type === 'message' ? new MessageEvent('message', init)
         : type === 'close' ? new CloseEvent('close', init)
         : new Event(type);
-      const handler = this['on' + type];
-      if (typeof handler === 'function') handler.call(this, event);
       this.dispatchEvent(event);
     }
     _connect() {
@@ -119,8 +119,26 @@
     }
     close(code, reason) {
       if (this._native) this._native.close(code, reason);
-      else this._emit('close', { code: code || 1000, reason: reason || '', wasClean: true });
+      else this._emit('close', { code: code || NORMAL_CLOSURE, reason: reason || '', wasClean: true });
     }
+  }
+
+  // on<type> handlers are listeners, as on a native socket: event.target is set, the order follows
+  // registration, and a throwing page handler cannot break the script's own work
+  for (const type of ['open', 'message', 'error', 'close']) {
+    Object.defineProperty(ProxySocket.prototype, `on${type}`, {
+      get() { return (this._handlers && this._handlers[type]) || null; },
+      set(value) {
+        if (!this._handlers) this._handlers = {};
+        if (!(type in this._handlers)) {
+          this.addEventListener(type, (event) => {
+            const handler = this._handlers[type];
+            if (typeof handler === 'function') handler.call(this, event);
+          });
+        }
+        this._handlers[type] = typeof value === 'function' ? value : null;
+      },
+    });
   }
 
   /** Any other WebSocket on the page origin (camera streams): opened by the WebView to the current server. */
@@ -152,38 +170,54 @@
       if (!this._opened || this._closed) throw new DOMException('WebSocket is not open', 'InvalidStateError');
       const sid = this._sid;
       if (typeof data === 'string') {
-        this._sending = this._sending.then(() => channel.postMessage(JSON.stringify({ type: 'wsSend', sid, text: data })));
+        this._sending = this._sending.then(() => channel.postMessage(JSON.stringify({ type: 'wsSend', sid, text: data }))).catch(() => {});
         return;
       }
       // Blobs are read asynchronously; the chain keeps the frame order
       this._sending = this._sending.then(async () => {
         const bytes = new Uint8Array(data instanceof Blob ? await data.arrayBuffer() : ArrayBuffer.isView(data) ? data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) : data);
         if (binaryChannel) {
-          const framed = new Uint8Array(4 + bytes.length);
+          const framed = new Uint8Array(SOCKET_ID_BYTES + bytes.length);
           new DataView(framed.buffer).setInt32(0, sid);
-          framed.set(bytes, 4);
+          framed.set(bytes, SOCKET_ID_BYTES);
           channel.postMessage(framed.buffer);
         } else {
           channel.postMessage(JSON.stringify({ type: 'wsSend', sid, b64: toBase64(bytes) }));
         }
-      });
+      }).catch(() => {}); // one unreadable Blob does not block later frames
     }
     close(code, reason) {
-      if (this._closed) return;
+      if (code !== undefined && code !== NORMAL_CLOSURE && (code < 3000 || code > 4999)) {
+        throw new DOMException('The close code must be either 1000, or between 3000 and 4999.', 'InvalidAccessError');
+      }
+      if (reason !== undefined && new TextEncoder().encode(reason).length > 123) {
+        throw new DOMException('The close reason must not be greater than 123 bytes.', 'SyntaxError');
+      }
+      if (this._closed || this._closing) return;
+      this._closing = true;
       if (this._sid === undefined) { super.close(code, reason); return; }
-      channel.postMessage(JSON.stringify({ type: 'wsClose', sid: this._sid, code: code || 1000, reason: reason || '' }));
+      const sid = this._sid;
+      const post = () => channel.postMessage(JSON.stringify({ type: 'wsClose', sid, code: code || NORMAL_CLOSURE, reason: reason || '' }));
+      // After the frames already queued
+      this._sending = this._sending.then(post, post);
     }
     _deliver(data) {
       if (typeof data !== 'string' && this._binaryType === 'blob') data = new Blob([data]);
       this._emit('message', { data, origin: location.origin });
     }
     _fromApp(message) {
-      if (message.type === 'wsOpened') { this._protocol = message.protocol; this._opened = true; this._emit('open'); }
+      if (message.type === 'wsOpened') {
+        // A socket closed while connecting ends with the app's wsClosed: error and close, as a native one
+        if (this._closing) return;
+        this._protocol = message.protocol;
+        this._opened = true;
+        this._emit('open');
+      }
       else if (message.type === 'wsText') this._deliver(message.b64 !== undefined && message.b64 !== null ? fromBase64(message.b64).buffer : message.text);
       else if (message.type === 'wsClosed') {
         appSockets.delete(this._sid);
         if (!this._opened) this._emit('error');
-        this._emit('close', { code: message.code, reason: message.reason, wasClean: message.code === 1000 });
+        this._emit('close', { code: message.code, reason: message.reason, wasClean: message.code === NORMAL_CLOSURE });
       }
     }
   }
@@ -280,7 +314,7 @@
       if (this._closed || this._native) return;
       if (await this._move()) return;
       if (Date.now() < deadline) setTimeout(() => this._recover(deadline), RECOVER_RETRY_MS);
-      else this._emit('close', { code: 1006, reason: 'Connection lost', wasClean: false });
+      else this._emit('close', { code: ABNORMAL_CLOSURE, reason: 'Connection lost', wasClean: false });
     }
 
     onSwitch() {
@@ -409,7 +443,7 @@
 
   window.WebSocket = function WebSocket(url, protocols) {
     if (!new.target) throw new TypeError("Failed to construct 'WebSocket': Please use the 'new' operator");
-    const parsed = new URL(url, location.href);
+    const parsed = new URL(url, document.baseURI);
     if (parsed.host !== location.host) return protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
     if (parsed.pathname === HA_WEBSOCKET_PATH) return new HaSocket(url, protocols);
     return parsed.pathname.startsWith(INGRESS_PATH) ? new AppSocket(url, protocols) : new PlainSocket(url, protocols);
@@ -434,16 +468,19 @@
 
   const bridgedFetch = async (request) => {
     const url = new URL(request.url);
-    const body = new Uint8Array(await request.arrayBuffer());
+    // A Blob, which Chromium can keep on disk for a large file
+    const body = await request.blob();
     const call = { type: 'request', method: request.method, path: url.pathname + url.search, headers: [...request.headers.entries()] };
-    if (body.length > CHUNK_BYTES) {
-      // Large uploads (backups, media) go in pieces to a file in the app
+    if (body.size > CHUNK_BYTES) {
+      // Large uploads (backups, media) go in pieces to a file in the app, each one after the app stored the last
       call.uploadId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      for (let i = 0; i < body.length; i += CHUNK_BYTES) {
-        channel.postMessage(JSON.stringify({ type: 'chunk', uploadId: call.uploadId, body: toBase64(body.subarray(i, i + CHUNK_BYTES)) }));
+      for (let i = 0; i < body.size; i += CHUNK_BYTES) {
+        const bytes = new Uint8Array(await body.slice(i, i + CHUNK_BYTES).arrayBuffer());
+        const stored = await ask({ type: 'chunk', uploadId: call.uploadId, body: toBase64(bytes) });
+        if (stored.error) throw new TypeError(stored.error);
       }
-    } else if (body.length) {
-      call.body = toBase64(body);
+    } else if (body.size) {
+      call.body = toBase64(new Uint8Array(await body.arrayBuffer()));
     }
     const reply = await ask(call);
     if (reply.error) throw new TypeError(reply.error);
@@ -451,22 +488,30 @@
     return new Response(noBody ? null : fromBase64(reply.body || ''), { status: reply.status, statusText: reply.statusText, headers: reply.headers });
   };
 
-  const needsBridge = (method, url) => method !== 'GET' && method !== 'HEAD' && new URL(url, location.href).host === location.host;
+  const needsBridge = (method, url) => method !== 'GET' && method !== 'HEAD' && new URL(url, document.baseURI).host === location.host;
 
-  window.fetch = (input, init) => {
-    const method = ((init && init.method) || (input instanceof Request ? input.method : 'GET')).toUpperCase();
-    const url = input instanceof Request ? input.url : String(input);
-    if (!needsBridge(method, url)) return nativeFetch(input, init);
-    return bridgedFetch(new Request(input, init));
+  window.fetch = function fetch(input, init) {
+    try {
+      const method = ((init && init.method) || (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      const url = input instanceof Request ? input.url : String(input);
+      if (!needsBridge(method, url)) return nativeFetch(input, init);
+      return bridgedFetch(new Request(input, init));
+    } catch (e) {
+      // Bad input rejects, as with the native fetch
+      return Promise.reject(e);
+    }
   };
 
   const xhr = XMLHttpRequest.prototype;
   const nativeOpen = xhr.open;
   const nativeSend = xhr.send;
   const nativeSetRequestHeader = xhr.setRequestHeader;
+  const bridgedProperties = ['readyState', 'status', 'statusText', 'response', 'responseText', 'responseURL', 'getResponseHeader', 'getAllResponseHeaders'];
   xhr.open = function (method, url, ...rest) {
+    // A reused request reports its new request, not what a bridged send set before
+    for (const name of bridgedProperties) delete this[name];
     const upper = String(method).toUpperCase();
-    this.__haBridge = needsBridge(upper, url) ? { method: upper, url: new URL(url, location.href).href, headers: new Headers() } : null;
+    this.__haBridge = needsBridge(upper, url) ? { method: upper, url: new URL(url, document.baseURI).href, headers: new Headers() } : null;
     return nativeOpen.call(this, method, url, ...rest);
   };
   xhr.setRequestHeader = function (name, value) {
@@ -490,7 +535,7 @@
       set('statusText', response.statusText);
       set('responseURL', call.url);
       set('responseText', text);
-      set('response', type === 'json' ? json : type === 'arraybuffer' ? buffer : type === 'blob' ? new Blob([buffer]) : text);
+      set('response', type === 'json' ? json : type === 'arraybuffer' ? buffer : type === 'blob' ? new Blob([buffer], { type: response.headers.get('content-type') || '' }) : text);
       request.getResponseHeader = (name) => response.headers.get(name);
       request.getAllResponseHeaders = () => [...response.headers].map(([k, v]) => `${k}: ${v}`).join('\r\n');
       fire(request.upload, 'progress');
@@ -518,11 +563,16 @@
     navigator.share = (data) => share(data ? { ...data, url: toPublic(data.url), text: toPublic(data.text) } : data);
   }
 
+  // The WebView closes a page's own WebSockets when the page goes away; the app's ones must be told
+  addEventListener('pagehide', () => {
+    for (const sid of appSockets.keys()) channel.postMessage(JSON.stringify({ type: 'wsClose', sid, code: NORMAL_CLOSURE, reason: '' }));
+  });
+
   channel.onmessage = (event) => {
     if (event.data instanceof ArrayBuffer) {
       // A binary frame for an AppSocket: the socket id, then the payload
       const socket = appSockets.get(new DataView(event.data).getInt32(0));
-      if (socket) socket._deliver(event.data.slice(4));
+      if (socket) socket._deliver(event.data.slice(SOCKET_ID_BYTES));
       return;
     }
     const message = parse(event.data);
@@ -534,7 +584,15 @@
       binaryChannel = !!message.binary;
       const queued = waiting;
       waiting = [];
-      queued.forEach((socket) => socket._start());
+      for (const socket of queued) {
+        // One socket that cannot start does not stop the others
+        try {
+          socket._start();
+        } catch (e) {
+          socket._emit('error');
+          socket._emit('close', { code: ABNORMAL_CLOSURE, reason: '', wasClean: false });
+        }
+      }
     } else if (message.type === 'switch') {
       wsBase = message.ws;
       [...sockets].forEach((socket) => socket.onSwitch());

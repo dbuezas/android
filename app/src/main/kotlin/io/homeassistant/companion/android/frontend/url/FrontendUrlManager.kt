@@ -47,6 +47,12 @@ class FrontendUrlManager @Inject constructor(
     /** Ids of servers whose open frontend just moved to a new server URL without reloading. */
     val serverUrlMoves: Flow<Int> = upstream.moves
 
+    /** Ids of servers that must now load their real URL, see [FrontendUpstream.useRealUrl]. */
+    val realUrlFallbacks: Flow<Int> = upstream.realUrlFallbacks
+
+    /** [url] with an app-internal host replaced by the host of the server URL in use, or null for other URLs. */
+    fun toRealHost(url: String): String? = upstream.toRealHost(url)
+
     /** Moves the open frontend of [serverId] to the server URL of the last [UrlLoadResult.Success]. */
     fun announceServerUrlSwitch(serverId: Int) = upstream.announceSwitch(serverId)
 
@@ -67,6 +73,8 @@ class FrontendUrlManager @Inject constructor(
      *
      * The target is only applied to the first emission to handle deep links.
      * Subsequent emissions (e.g., when switching between internal/external URLs) load only the base URL.
+     * Success URLs are on the app-internal origin when the WebView supports it, and later ones are marked
+     * [UrlLoadResult.Success.isServerUrlSwitch].
      *
      * @param serverId The server ID to use (can be [ServerManager.SERVER_ID_ACTIVE])
      * @param target The frontend destination to open on the initial URL (e.g., a deep link)
@@ -161,7 +169,7 @@ class FrontendUrlManager @Inject constructor(
                 val realUrl = url.newBuilder().addQueryParameter(EXTERNAL_AUTH_QUERY_PARAM, "1").build()
                 Timber.d("Loading server URL: ${sensitive(realUrl.toString())}")
                 // On the app-internal origin, a later switch to the other server URL does not reload the page
-                val urlWithAuth = if (upstream.isSupported) {
+                val urlWithAuth = if (upstream.usesVirtualOrigin(serverId)) {
                     upstream.useServerUrl(serverId, realUrl).toString()
                 } else {
                     realUrl.toString()
