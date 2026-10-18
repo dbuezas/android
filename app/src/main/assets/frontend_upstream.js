@@ -56,7 +56,11 @@
   };
 
   /** Subscriptions are commands that keep sending events after their result. */
-  const isSubscription = (type) => !/unsubscribe/.test(type || '') && /subscribe|stream|render_template/.test(type || '');
+  // Subscriptions are recognized by name. Commands that stream events under another name start an action
+  // (assist_pipeline/run, zwave_js/add_node, camera/webrtc/offer): repeating them would run it again.
+  // camera/stream is a one-shot request.
+  const isSubscription = (type) => !/unsubscribe/.test(type || '')
+    && /subscribe|^history\/stream$|^logbook\/event_stream$|^render_template$/.test(type || '');
 
   /** Base for both kinds of socket: a WebSocket look-alike that the page holds on to. */
   class ProxySocket extends EventTarget {
@@ -192,7 +196,6 @@
       this._features = null;
       this._subscriptions = new Map();
       this._pending = new Map();
-      this._finished = new Map();
       this._skipResults = new Set();
       this._outbox = [];
       this._holding = false;
@@ -209,6 +212,8 @@
 
     send(data) {
       if (this._closed || !this._pending) throw new DOMException('WebSocket is not open', 'InvalidStateError');
+      // Held messages are recorded when they really go out, so a hand-over never fails one it then sends
+      if (this._holding || !this._native || this._native.readyState !== 1) { this._outbox.push(data); return; }
       const message = parse(data);
       if (message && !Array.isArray(message)) {
         if (message.type === 'auth') {
@@ -217,13 +222,17 @@
           if (message.type === 'supported_features') this._features = data;
           if (message.type === 'unsubscribe_events') {
             this._subscriptions.delete(message.subscription);
-            this._finished.delete(message.subscription);
           }
           this._pending.set(message.id, { raw: data, type: message.type });
         }
       }
-      if (!this._holding && this._native && this._native.readyState === 1) this._native.send(data);
-      else this._outbox.push(data);
+      this._native.send(data);
+    }
+
+    _flush() {
+      const queued = this._outbox;
+      this._outbox = [];
+      queued.forEach((data) => this.send(data));
     }
 
     close(code, reason) {
@@ -249,13 +258,7 @@
         if (sent) {
           this._pending.delete(message.id);
           if (message.type === 'result' && message.success && isSubscription(sent.type)) this._subscriptions.set(message.id, sent.raw);
-          else this._finished.set(message.id, sent.raw);
-          if (this._finished.size > 200) this._finished.delete(this._finished.keys().next().value);
         }
-      } else if (message.type === 'event' && !this._subscriptions.has(message.id)) {
-        // A command with an unusual name turned out to be a subscription
-        const raw = this._finished.get(message.id) || (this._pending.get(message.id) || {}).raw;
-        if (raw) this._subscriptions.set(message.id, raw);
       }
       return true;
     }
@@ -265,7 +268,9 @@
     }
 
     _onClose(e) {
-      if (this._pageClosing || !this._authed) { super._onClose(e); return; }
+      // A clean close comes from Home Assistant itself (a restart): the page reconnects and refreshes its
+      // data, as without this script
+      if (this._pageClosing || !this._authed || e.wasClean) { super._onClose(e); return; }
       // The network went away under the connection: reconnect quietly before telling the page
       this._native = null;
       this._holding = true;
@@ -357,9 +362,7 @@
       }
       this._pending = new Map();
       this._holding = false;
-      const queued = this._outbox;
-      this._outbox = [];
-      queued.forEach((data) => this.send(data));
+      this._flush();
       if (old) { try { old.close(); } catch (e) {} }
       // Tell the app when the connection now runs on another server, however it got there (an announced
       // switch, or a reconnect after the old network went away)
