@@ -37,6 +37,14 @@
   let publicOrigin = null;
   let waiting = [];
   let nextId = 0;
+  // The server the page's Home Assistant connection last logged in to
+  let loggedInHost = null;
+
+  /** Tells the app when the page's connection now runs on another server than before. */
+  const reportLogin = (host) => {
+    if (loggedInHost && loggedInHost !== host) channel.postMessage(JSON.stringify({ type: 'moved' }));
+    loggedInHost = host;
+  };
 
   const ask = (message) => new Promise((resolve) => {
     const id = ++nextId;
@@ -284,7 +292,11 @@
 
     /** Follows the conversation so it can be repeated on a new connection. Returns false to hide a message. */
     _track(message) {
-      if (message.type === 'auth_ok') this._authed = true;
+      if (message.type === 'auth_ok') {
+        this._authed = true;
+        // A page that reconnected by itself (after its connection died while hidden) also changes server
+        reportLogin(this._host);
+      }
       if (message.type === 'result' && this._skipResults.delete(message.id)) return false;
       if (message.type === 'result' || message.type === 'pong') {
         const sent = this._pending.get(message.id);
@@ -388,7 +400,6 @@
     async _handOver(ws) {
       ws.onmessage = ws.onclose = ws.onerror = null;
       const old = this._native;
-      const fromHost = this._host;
       this._holding = true;
       // Commands already sent on a working old connection get their answers there first
       const drainUntil = Date.now() + DRAIN_TIMEOUT_MS;
@@ -431,7 +442,7 @@
       // Tell the app when the connection now runs on another server, however it got there (an announced
       // switch, or a reconnect after the old network went away)
       this._host = new URL(ws.url).host;
-      if (fromHost && fromHost !== this._host) channel.postMessage(JSON.stringify({ type: 'moved' }));
+      reportLogin(this._host);
       return true;
     }
 

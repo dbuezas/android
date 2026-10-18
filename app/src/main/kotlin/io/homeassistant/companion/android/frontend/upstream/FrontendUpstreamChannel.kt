@@ -106,7 +106,9 @@ class FrontendUpstreamChannel @VisibleForTesting constructor(
         webView.settings.mixedContentMode = if (allowPlainHttp) {
             WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         } else {
-            WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            // Blocks plain-http scripts, frames and requests. NEVER_ALLOW makes WebView 151 crash natively
+            // on the first load of the app-internal origin (seen on a Pixel 7, Android 16)
+            WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         }
         withContext(ioDispatcher) { http.prepare() }
         if (attached.containsKey(webView)) return
