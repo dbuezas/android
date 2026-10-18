@@ -170,6 +170,7 @@
     }
     close(code, reason) {
       if (this._closed) return;
+      if (this._sid === undefined) { super.close(code, reason); return; }
       channel.postMessage(JSON.stringify({ type: 'wsClose', sid: this._sid, code: code || 1000, reason: reason || '' }));
     }
     _deliver(data) {
@@ -190,6 +191,7 @@
   /** The Home Assistant WebSocket: survives server switches and network breaks without the page noticing. */
   class HaSocket extends ProxySocket {
     _start() {
+      if (this._closed) return;
       this._authMessage = null;
       this._authed = false;
       this._pageClosing = false;
@@ -200,14 +202,10 @@
       this._outbox = [];
       this._holding = false;
       this._moving = null;
+      this._abortMove = null;
       this._native = this._connect();
       this._host = new URL(this._native.url).host;
       this._listen(this._native);
-    }
-
-    get readyState() {
-      if (this._closed) return 3;
-      return this._opened ? 1 : 0;
     }
 
     send(data) {
@@ -237,6 +235,7 @@
 
     close(code, reason) {
       this._pageClosing = true;
+      if (this._abortMove) this._abortMove();
       super.close(code, reason);
     }
 
@@ -285,82 +284,113 @@
     }
 
     onSwitch() {
-      if (this._closed || this._pageClosing) return;
+      // A socket still waiting for the app's base has nothing to move
+      if (this._closed || this._pageClosing || !this._pending) return;
       if (!this._authed) {
         // Not logged in yet: start over on the new server, the page simply waits a little longer
         if (this._authMessage) return;
         const old = this._native;
-        this._native = this._connect();
-        this._listen(this._native);
+        const ws = this._connect();
+        this._native = ws;
+        this._host = new URL(ws.url).host;
+        this._listen(ws);
+        // The page may send its login while the new connection is still opening
+        ws.addEventListener('open', () => { if (ws === this._native) this._flush(); });
         if (old) old.close();
         return;
       }
+      if (this._abortMove) this._abortMove();
       this._move();
     }
 
     /** Opens and logs in a connection to the current server, then hands the conversation over to it. */
     _move() {
       if (this._moving) return this._moving;
+      const target = wsBase;
       this._moving = new Promise((resolve) => {
         const ws = this._connect();
         let settled = false;
         const settle = (ok) => {
           if (settled) return;
           settled = true;
+          this._abortMove = null;
           clearTimeout(timer);
           if (!ok) { try { ws.close(); } catch (e) {} }
           resolve(ok);
         };
         const timer = setTimeout(() => settle(false), MOVE_TIMEOUT_MS);
+        // A switch, or the page closing its socket, gives up an attempt that has not logged in
+        this._abortMove = () => settle(false);
         ws.onmessage = async (e) => {
           const parsed = parse(e.data);
           for (const message of [].concat(parsed || [])) {
             if (message.type === 'auth_required') {
               const reply = await ask({ type: 'token' });
-              if (!reply.token || settled) { settle(false); return; }
+              if (!reply.token || settled || this._closed || this._pageClosing) { settle(false); return; }
               const auth = parse(this._authMessage) || {};
               ws.send(JSON.stringify({ ...auth, type: 'auth', access_token: reply.token }));
             } else if (message.type === 'auth_invalid') {
               settle(false);
             } else if (message.type === 'auth_ok') {
-              await this._handOver(ws);
-              settle(true);
+              if (settled) return;
+              this._abortMove = null;
+              clearTimeout(timer);
+              settle(await this._handOver(ws));
             }
           }
         };
         ws.onclose = () => settle(false);
         ws.onerror = () => settle(false);
-      }).finally(() => { this._moving = null; });
+      }).finally(() => {
+        this._moving = null;
+        // The app switched again while this attempt went to the previous server URL
+        if (target !== wsBase && this._authed && !this._closed && !this._pageClosing
+          && (!this._native || new URL(wsBase).host !== this._host)) this._move();
+      });
       return this._moving;
     }
 
+    /** Returns false when the new connection cannot take over; the page then stays where it is. */
     async _handOver(ws) {
+      ws.onmessage = ws.onclose = ws.onerror = null;
       const old = this._native;
       const fromHost = this._host;
       this._holding = true;
       // Commands already sent on a working old connection get their answers there first
       const drainUntil = Date.now() + DRAIN_TIMEOUT_MS;
-      while (old && old.readyState === 1 && this._hasOpenCommands() && Date.now() < drainUntil) {
+      while (ws.readyState === 1 && old && old.readyState === 1 && this._hasOpenCommands() && Date.now() < drainUntil) {
         await new Promise((r) => setTimeout(r, DRAIN_POLL_MS));
       }
-      ws.onmessage = ws.onclose = ws.onerror = null;
+      if (this._closed || this._pageClosing) return false;
+      if (ws.readyState !== 1) {
+        // The new connection died while the old one finished its commands: stay where the page is
+        this._holding = !this._native;
+        if (!this._holding) this._flush();
+        return false;
+      }
       this._native = ws;
       this._listen(ws);
-      // Repeat what makes up the page's session, in the original order (ids must keep increasing)
+      // Repeat what makes up the page's session, in the original order (ids must keep increasing).
+      // Subscriptions still waiting for their result are sent again, as home-assistant-js-websocket
+      // does after a reconnect; the page gets their result from the new connection.
       this._skipResults = new Set();
-      const replay = [...this._subscriptions.entries()].sort((a, b) => a[0] - b[0]).map((entry) => entry[1]);
-      if (this._features) replay.unshift(this._features);
-      for (const raw of replay) {
-        this._skipResults.add(parse(raw).id);
+      const resend = new Map([...this._pending].filter(([, sent]) => sent.raw !== this._features && isSubscription(sent.type)));
+      const replay = [...this._subscriptions, ...[...resend].map(([id, sent]) => [id, sent.raw])].sort((a, b) => a[0] - b[0]);
+      if (this._features) replay.unshift([parse(this._features).id, this._features]);
+      for (const [id, raw] of replay) {
+        if (!resend.has(id)) this._skipResults.add(id);
         ws.send(raw);
       }
-      // Commands whose answer was lost with the old connection fail, as they would on a reconnect.
-      // They are never sent again: they may have run already.
+      // Other commands whose answer was lost with the old connection fail, as they would on a reconnect.
+      // They are never sent again: they may have run already. Pings are answered: the new connection
+      // just logged in.
       for (const [id, sent] of this._pending) {
-        if (sent.raw === this._features) continue;
-        this._emit('message', { data: JSON.stringify({ id, type: 'result', success: false, error: { code: 'connection_lost', message: 'Connection lost' } }) });
+        if (sent.raw === this._features || resend.has(id)) continue;
+        const answer = sent.type === 'ping' ? { id, type: 'pong' }
+          : { id, type: 'result', success: false, error: { code: 'connection_lost', message: 'Connection lost' } };
+        this._emit('message', { data: JSON.stringify(answer) });
       }
-      this._pending = new Map();
+      this._pending = resend;
       this._holding = false;
       this._flush();
       if (old) { try { old.close(); } catch (e) {} }
@@ -368,6 +398,7 @@
       // switch, or a reconnect after the old network went away)
       this._host = new URL(ws.url).host;
       if (fromHost && fromHost !== this._host) channel.postMessage(JSON.stringify({ type: 'moved' }));
+      return true;
     }
 
     _hasOpenCommands() {
