@@ -30,6 +30,7 @@ private const val MORE_INFO_ENTITY_ID_QUERY_PARAM = "more-info-entity-id"
  * - Adding `external_auth=1` query parameter to signal the Home Assistant frontend
  *   that authentication will be provided via the JavaScript bridge
  */
+@Suppress("TooManyFunctions") // TEMPORARY with debugToast
 @ViewModelScoped
 class FrontendUrlManager @Inject constructor(
     private val serverManager: ServerManager,

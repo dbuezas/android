@@ -507,7 +507,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
      * Results are emitted to [connectivityCheckState].
      */
     override fun runConnectivityChecks() {
-        val currentUrl = _viewState.value.url
+        val currentUrl = urlManager.toRealUrl(_viewState.value.url)
         connectivityCheckJob?.cancel()
         connectivityCheckJob = viewModelScope.launch {
             connectivityCheckRepository.runChecks(currentUrl).collect { state ->
@@ -854,9 +854,11 @@ internal class FrontendViewModel @VisibleForTesting constructor(
     /** Tells the user when the frontend moved between the internal and the external URL without reloading. */
     private fun collectServerUrlMoves() {
         viewModelScope.launch {
-            urlManager.serverUrlMoves.collect { serverId ->
-                if (serverId != _viewState.value.serverId) return@collect
-                val message = if (resolveIsInternalConnection(serverId)) {
+            urlManager.serverUrlMoves.collectLatest { serverId ->
+                // A snackbar shown while the screen is stopped times out unseen; only the latest move is told
+                isScreenStarted.first { it }
+                if (serverId != _viewState.value.serverId) return@collectLatest
+                val message = if (usesInternalUrl(serverId)) {
                     commonR.string.frontend_switched_to_internal_url
                 } else {
                     commonR.string.frontend_switched_to_external_url
@@ -864,6 +866,13 @@ internal class FrontendViewModel @VisibleForTesting constructor(
                 _events.emit(FrontendEvent.ShowSnackbar(message))
             }
         }
+    }
+
+    /** Whether the frontend of [serverId] now runs on the server's internal URL. */
+    private suspend fun usesInternalUrl(serverId: Int): Boolean {
+        val inUse = urlManager.toRealUrl(_viewState.value.url).toHttpUrlOrNull()
+        val internal = serverManager.getServer(serverId)?.connection?.internalUrl?.toHttpUrlOrNull()
+        return inUse != null && internal != null && inUse.hasSameOrigin(internal)
     }
 
     private fun loadServer(serverId: Int, target: FrontendTarget) {
@@ -1033,20 +1042,31 @@ internal class FrontendViewModel @VisibleForTesting constructor(
      */
     private suspend fun handleServerUrlSwitch(result: UrlLoadResult.Success): Boolean {
         val current = _viewState.value
-        val isSwitch = result.isServerUrlSwitch &&
-            current.serverId == result.serverId &&
-            result.url.toUri().hasSameOrigin(current.url)
+        val sameServer = current.serverId == result.serverId
+        val sameOrigin = result.url.toHttpUrlOrNull()?.let { url ->
+            current.url.toHttpUrlOrNull()?.hasSameOrigin(url)
+        } == true
+        val isSwitch = result.isServerUrlSwitch && sameServer && sameOrigin
         // TEMPORARY test builds: show why a URL result is or is not a switch
         urlManager.debugToast(
-            "Test: result flag=${result.isServerUrlSwitch} sameServer=${current.serverId == result.serverId} " +
-                "sameOrigin=${result.url.toUri().hasSameOrigin(current.url)} state=${current.logDescription()}",
+            "Test: result flag=${result.isServerUrlSwitch} sameServer=$sameServer " +
+                "sameOrigin=$sameOrigin state=${current.logDescription()}",
         )
-        if (!isSwitch) return false
+        if (!isSwitch) {
+            if (result.isServerUrlSwitch) {
+                Timber.i(
+                    "New URL of server ${result.serverId} reloads the frontend: same server $sameServer, " +
+                        "same origin $sameOrigin, state ${current.logDescription()}",
+                )
+            }
+            return false
+        }
         Timber.i("Server URL switch in state ${current.logDescription()}")
-        if (current is FrontendViewState.Content || current is FrontendViewState.Loading) {
+        if (current is FrontendViewState.Content || (current is FrontendViewState.Loading && current.connected)) {
             prepareUrlLoad(urlManager.toRealUrl(result.url))
             urlManager.announceServerUrlSwitch(result.serverId)
         } else {
+            // A page still connecting, or not showing, is loaded again
             startLoad(result.serverId)
         }
         return true

@@ -1,15 +1,13 @@
 package io.homeassistant.companion.android.frontend.upstream
 
 import androidx.webkit.JavaScriptReplyProxy
+import app.cash.turbine.test
 import io.homeassistant.companion.android.common.data.servers.ServerManager
 import io.homeassistant.companion.android.database.server.ServerConnectionInfo
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -83,14 +81,44 @@ class FrontendUpstreamTest {
     }
 
     @Test
-    fun `Given a page that moved when it reports it then the server id is emitted`() = runTest(UnconfinedTestDispatcher()) {
-        var moved: Int? = null
-        val job = launch { moved = upstream.moves.first() }
+    fun `Given a page that moved when it reports it then the server id is emitted`() = runTest {
+        upstream.moves.test {
+            upstream.onPageMoved("server-3.homeassistant.internal")
 
-        upstream.onPageMoved("server-3.homeassistant.internal")
-        job.join()
+            assertEquals(3, awaitItem())
+        }
+    }
 
-        assertEquals(3, moved)
+    @Test
+    fun `Given a cloud connection when a page says hello then links use the cloud origin`() = runTest {
+        val page: JavaScriptReplyProxy = mockk(relaxed = true)
+        coEvery { serverManager.getServer(1) } returns mockk {
+            every { connection } returns ServerConnectionInfo(
+                externalUrl = "http://192.168.1.2:8123",
+                cloudUrl = "https://example.ui.nabu.casa",
+                useCloud = true,
+            )
+        }
+        upstream.useServerUrl(1, "http://192.168.1.2:8123/".toHttpUrl())
+
+        upstream.onPageHello("server-1.homeassistant.internal", page, binary = false)
+
+        verify {
+            page.postMessage(
+                FrontendUpstreamChannel.baseMessage("ws://192.168.1.2:8123", "https://example.ui.nabu.casa", false),
+            )
+        }
+    }
+
+    @Test
+    fun `Given a hello from another host when the server URL switches then nothing is posted`() = runTest {
+        val page: JavaScriptReplyProxy = mockk(relaxed = true)
+        upstream.useServerUrl(1, "http://192.168.1.2:8123/".toHttpUrl())
+
+        upstream.onPageHello("homeassistant.local", page, binary = false)
+        upstream.announceSwitch(1)
+
+        verify(exactly = 0) { page.postMessage(any<String>()) }
     }
 
     @Test

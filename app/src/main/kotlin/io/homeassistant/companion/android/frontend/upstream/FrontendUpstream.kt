@@ -3,10 +3,10 @@ package io.homeassistant.companion.android.frontend.upstream
 import android.content.Context
 import android.widget.Toast
 import androidx.annotation.MainThread
-import dagger.hilt.android.qualifiers.ApplicationContext
-import io.homeassistant.companion.android.BuildConfig
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.WebViewFeature
+import dagger.hilt.android.qualifiers.ApplicationContext
+import io.homeassistant.companion.android.BuildConfig
 import io.homeassistant.companion.android.common.data.servers.ServerManager
 import io.homeassistant.companion.android.database.server.ServerConnectionInfo
 import io.homeassistant.companion.android.util.sensitive
@@ -40,8 +40,8 @@ class FrontendUpstream @Inject constructor(
     private val bases = ConcurrentHashMap<Int, HttpUrl>()
     private val connections = ConcurrentHashMap<Int, ServerConnectionInfo>()
 
-    /** Pages (main frame and frames) currently open on each virtual origin, to tell them about a switch. */
-    private val pages = ConcurrentHashMap<Int, MutableSet<JavaScriptReplyProxy>>()
+    /** Pages (main frame and frames) currently open on each virtual origin, to tell them about a switch. Main thread only. */
+    private val pages = HashMap<Int, MutableSet<JavaScriptReplyProxy>>()
 
     private val _moves = MutableSharedFlow<Int>(extraBufferCapacity = 1)
 
@@ -67,9 +67,12 @@ class FrontendUpstream @Inject constructor(
     /** Tells the open pages of [serverId] to move their WebSocket to the server URL set by [useServerUrl]. */
     @MainThread
     fun announceSwitch(serverId: Int) {
-        val base = bases[serverId] ?: return
+        val base = bases[serverId] ?: run {
+            Timber.w("No server URL in use for server $serverId, nothing to announce")
+            return
+        }
         val message = FrontendUpstreamChannel.switchMessage(VirtualOrigin.webSocketBase(base))
-        val open = pages[serverId]?.let { synchronized(it) { it.toList() } }.orEmpty()
+        val open = pages[serverId]?.toList().orEmpty()
         Timber.i("Server $serverId switched to ${sensitive(base.host)}, telling ${open.size} open pages")
         open.forEach { it.postMessage(message) }
         debugToast("Test: switch sent to ${open.size} pages")
@@ -106,12 +109,16 @@ class FrontendUpstream @Inject constructor(
     @MainThread
     internal suspend fun onPageHello(host: String, replyProxy: JavaScriptReplyProxy, binary: Boolean) {
         val serverId = VirtualOrigin.serverIdOf(host) ?: return
-        pages.getOrPut(serverId) { Collections.synchronizedSet(Collections.newSetFromMap(WeakHashMap())) }
-            .add(replyProxy)
-        val base = bases[serverId] ?: return
+        val connection = serverManager.getServer(serverId)?.connection
+        // Nothing below suspends: no switch can come between the page's base and its registration
+        val base = bases[serverId] ?: run {
+            Timber.w("Page of server $serverId said hello before its server URL was set")
+            return
+        }
+        pages.getOrPut(serverId) { Collections.newSetFromMap(WeakHashMap()) }.add(replyProxy)
         val message = FrontendUpstreamChannel.baseMessage(
             VirtualOrigin.webSocketBase(base),
-            publicOrigin(serverId, base),
+            publicOrigin(connection, base),
             binary,
         )
         replyProxy.postMessage(message)
@@ -133,21 +140,23 @@ class FrontendUpstream @Inject constructor(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Timber.w(e, "Unable to get an access token for the page")
+            Timber.w(e, "Failed to get an access token for the page of server $serverId")
             null
         }
     }
 
-    /** The address used for links leaving the app: the external URL when there is one. */
-    private suspend fun publicOrigin(serverId: Int, current: HttpUrl): String {
-        val connection = serverManager.getServer(serverId)?.connection
-        val public = listOfNotNull(connection?.externalUrl, connection?.cloudUrl)
-            .firstNotNullOfOrNull { it.takeIf(String::isNotBlank)?.toHttpUrlOrNull() } ?: current
+    /** The address used for links leaving the app: the remote URL the app uses, else [current]. */
+    private fun publicOrigin(connection: ServerConnectionInfo?, current: HttpUrl): String {
+        val remote = connection?.let { if (it.useCloud && it.cloudUrl != null) it.cloudUrl else it.externalUrl }
+        val public = remote?.takeIf(String::isNotBlank)?.toHttpUrlOrNull() ?: current
         return public.toString().removeSuffix("/")
     }
 
     // TEMPORARY, test builds only: shows each step of a switch on the phone
     internal fun debugToast(text: String) {
-        if (BuildConfig.DEBUG) Toast.makeText(context, text, Toast.LENGTH_LONG).show()
+        if (!BuildConfig.DEBUG) return
+        Timber.i("Debug toast: $text")
+        // makeText returns null in unit tests; the log line stays in logcat when Android drops a toast
+        Toast.makeText(context, text, Toast.LENGTH_LONG)?.show()
     }
 }
