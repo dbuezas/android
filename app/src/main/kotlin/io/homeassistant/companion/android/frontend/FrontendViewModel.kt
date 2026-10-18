@@ -364,6 +364,7 @@ internal class FrontendViewModel @VisibleForTesting constructor(
 
     /** Job tracking the urlFlow collection - cancelled when switching servers. */
     private var urlFlowJob: Job? = null
+    private var announceJob: Job? = null
 
     /** Job tracking the zoom settings flow collection - restarted on each page load. */
     private var zoomObserverJob: Job? = null
@@ -1064,7 +1065,12 @@ internal class FrontendViewModel @VisibleForTesting constructor(
         Timber.i("Server URL switch in state ${current.logDescription()}")
         if (current is FrontendViewState.Content || (current is FrontendViewState.Loading && current.connected)) {
             prepareUrlLoad(urlManager.toRealUrl(result.url))
-            urlManager.announceServerUrlSwitch(result.serverId)
+            announceJob?.cancel()
+            announceJob = viewModelScope.launch {
+                // A page behind another screen is frozen (back-forward cache): its move would time out
+                isScreenStarted.first { it }
+                urlManager.announceServerUrlSwitch(result.serverId)
+            }
         } else {
             // A page still connecting, or not showing, is loaded again
             startLoad(result.serverId)
